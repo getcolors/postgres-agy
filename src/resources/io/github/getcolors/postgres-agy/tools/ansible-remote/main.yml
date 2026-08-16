@@ -281,7 +281,7 @@
       register: patroni_cluster
       until: >-
         (patroni_cluster.status | default(0)) == 200
-        and (patroni_cluster.json.members | selectattr('state', 'equalto', 'running') | list | length) == <{ cluster-nodes }>
+        and (patroni_cluster.json.members | selectattr('state', 'in', ['running', 'streaming']) | list | length) == <{ cluster-nodes }>
         and (patroni_cluster.json.members | selectattr('role', 'in', leader_roles) | list | length) == 1
       retries: 90
       delay: 5
