@@ -72,5 +72,12 @@ payload, `bb pin`, the golden and launcher scripts, and 17 unit tests (77 assert
 
 ## Phase: repositories and deployment scaffold — 2026-08-16T12:21:00+02:00
 
-Initializing Git repositories for `postgres-agy` and `postgres-agy-digitalocean`, creating public GitHub repositories on `getcolors`, committing, pushing, and running `bb pin` to stamp the launcher.
+- `getcolors/postgres-agy` created public, initial commit pushed, `bb pin` stamped the launcher to commit `6a8f94b`, and the stamped launcher was committed and pushed as `e218012`.
+- `getcolors/postgres-agy-digitalocean` created public and pushed.
+- Installed Package Skill `package-postgres-agy-green` with `npx skills add getcolors/postgres-agy`, generating `skills-lock.json`. Copied payload launcher to root `./green` (`cmp` confirmed byte-identical).
+- Verified credential-free `./green build` and `./green create --dry-run` in deployment repo resolving library from GitHub.
+
+## Phase: real deploy — 2026-08-16T12:22:15+02:00
+
+Executing `./green create` against DigitalOcean (`ams3`, `s-2vcpu-4gb`), Cloudflare DNS (`postgres-agy.bigconfig.online`), and Cloudflare R2 backup bucket (`postgres-agy-backup`).
 
