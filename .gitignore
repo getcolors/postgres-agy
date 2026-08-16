@@ -1,0 +1,12 @@
+.*
+!.gitignore
+!.envrc
+!.envrc.private.example
+!.nojekyll
+!.github
+!.github/**
+.colors/
+.direnv/
+.devenv/
+.cpcache/
+target/

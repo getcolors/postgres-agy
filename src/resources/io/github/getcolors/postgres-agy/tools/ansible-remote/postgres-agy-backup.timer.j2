@@ -1,0 +1,9 @@
+[Unit]
+Description=postgres-agy pgBackRest full backup timer
+
+[Timer]
+OnCalendar=<{ backup-oncalendar }>
+Persistent=true
+
+[Install]
+WantedBy=timers.target

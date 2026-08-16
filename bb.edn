@@ -1,0 +1,23 @@
+{:paths ["test/clj" "test/resources"]
+ :deps {io.github.getcolors/postgres-agy {:local/root "."}}
+ :tasks
+ {test {:doc "Run unit tests under Babashka"
+        :requires ([clojure.test :as t]
+                   [io.github.getcolors.postgres-agy.validate-test]
+                   [io.github.getcolors.postgres-agy.utils-test]
+                   [io.github.getcolors.postgres-agy.tools-test]
+                   [io.github.getcolors.postgres-agy.workflow-test]
+                   [io.github.getcolors.postgres-agy.operator-test])
+        :task (let [{:keys [fail error]}
+                    (t/run-tests 'io.github.getcolors.postgres-agy.validate-test
+                                 'io.github.getcolors.postgres-agy.utils-test
+                                 'io.github.getcolors.postgres-agy.tools-test
+                                 'io.github.getcolors.postgres-agy.workflow-test
+                                 'io.github.getcolors.postgres-agy.operator-test)]
+                (System/exit (if (pos? (+ fail error)) 1 0)))}
+  golden {:doc "Render and diff committed golden output"
+          :task (shell "./scripts/golden.sh")}
+  golden:accept {:doc "Regenerate goldens after inspecting a fresh render"
+                 :task (shell "./scripts/golden.sh" "--accept")}
+  pin {:doc "Stamp the launcher after a clean pushed commit"
+       :task (load-file "tasks/pin.clj")}}}

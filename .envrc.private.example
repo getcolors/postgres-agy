@@ -1,0 +1,11 @@
+# Example credentials for postgres-agy.
+# Copy to .envrc.private and fill in with your secrets.
+
+export COLORS_PAR_DO_TOKEN=""
+export COLORS_PAR_CLOUDFLARE_API_TOKEN=""
+export COLORS_PAR_R2_ACCESS_KEY_ID=""
+export COLORS_PAR_R2_SECRET_ACCESS_KEY=""
+export COLORS_PAR_BACKUP_R2_ACCESS_KEY_ID=""
+export COLORS_PAR_BACKUP_R2_SECRET_ACCESS_KEY=""
+export COLORS_PAR_POSTGRES_ADMIN_PASSWORD=""
+export COLORS_PAR_POSTGRES_REPLICATION_PASSWORD=""

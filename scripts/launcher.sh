@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+launcher="$root/skills/package-postgres-agy-green/green"
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+checks=0
+fail(){ echo "launcher: FAIL — $*" >&2; exit 1; }
+ok(){ checks=$((checks+1)); echo "  ok — $*"; }
+
+[ -f "$launcher" ] || fail 'payload launcher is missing'
+grep -q 'io.github.getcolors.postgres-agy.workflow/workflow' "$launcher" || fail 'workflow dispatch is missing'
+for bad in 'defn.*-step' 'tofu/' 'babashka\.process' 'ProcessBuilder'; do
+  ! grep -qE "$bad" "$launcher" || fail "launcher contains package logic: $bad"
+done
+ok 'dispatches to the library and contains no lifecycle logic'
+
+grep -qE '\(def \^:private postgres-agy-sha (nil|"[0-9a-f]{40}")\)' "$launcher" || fail 'invalid pin site'
+ok 'has one managed immutable pin site'
+
+mkdir "$tmp/bare"
+cp "$launcher" "$tmp/bare/green"; chmod +x "$tmp/bare/green"
+if grep -q '(def \^:private postgres-agy-sha nil)' "$launcher"; then
+  out=$(cd "$tmp/bare" && ./green build 2>&1 || true)
+  grep -q POSTGRES_AGY_LIB_ROOT <<<"$out" || fail 'an unpinned launcher did not explain POSTGRES_AGY_LIB_ROOT'
+  ok 'unstamped payload fails with an actionable working-tree override'
+else
+  ok 'payload carries a real package commit pin'
+fi
+
+mkdir "$tmp/project"
+cp "$launcher" "$tmp/project/green"; chmod +x "$tmp/project/green"
+cp "$root/colors.yml" "$tmp/project/colors.yml"
+(cd "$tmp/project" && POSTGRES_AGY_LIB_ROOT="$root" ./green build >/dev/null) || fail 'POSTGRES_AGY_LIB_ROOT build failed'
+[ -f "$tmp/project/.colors/postgres-agy-example/postgres-agy-infrastructure/main.tf" ] || fail 'copied payload rendered nothing'
+ok 'working-tree override renders from a copied payload'
+
+mkdir -p "$tmp/project/deep/path"
+(cd "$tmp/project/deep/path" && POSTGRES_AGY_LIB_ROOT="$root" ../../green build >/dev/null) || fail 'upward desired-state search failed'
+ok 'finds colors.yml by walking upward'
+
+out=$(cd "$tmp/project" && POSTGRES_AGY_LIB_ROOT="$root" ./green nonsense 2>&1 || true)
+grep -q Usage <<<"$out" || fail 'unknown command has no usage'
+for verb in build create delete status switchover failover backup verify-restore psql; do
+  grep -q "\"$verb\"" "$launcher" || fail "missing command $verb"
+done
+grep -q 'io.github.getcolors.postgres-agy.operator/run' "$launcher" || fail 'operator commands bypass tested code'
+ok 'lifecycle and operator commands are dispatchable'
+
+[ -L "$root/green" ] && [ "$(readlink "$root/green")" = skills/package-postgres-agy-green/green ] || fail 'root green is not the payload symlink'
+ok 'root launcher is the payload symlink'
+
+echo "launcher: $checks checks passed"

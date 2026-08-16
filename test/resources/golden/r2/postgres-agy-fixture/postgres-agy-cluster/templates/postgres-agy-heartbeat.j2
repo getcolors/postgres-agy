@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# postgres-agy-heartbeat — one row a minute, written only by the leader.
+set -euo pipefail
+
+PATRONI_URL="http://{{ private_ip }}:8008"
+DB="appdb"
+RETENTION_DAYS=7
+
+export PGHOST=/var/run/postgresql
+export PGPORT=5432
+
+if [ "$(id -un)" != postgres ]; then
+  exec sudo -n -u postgres -- "$0" "$@"
+fi
+
+if ! curl -fsS -o /dev/null --max-time 5 "$PATRONI_URL/primary"; then
+  exit 0
+fi
+
+psql -X -q -v ON_ERROR_STOP=1 -d "$DB" <<SQL
+INSERT INTO colors_restore_sentinel (token, node)
+VALUES (gen_random_uuid()::text, '{{ inventory_hostname }}');
+DELETE FROM colors_restore_sentinel
+WHERE written < now() - interval '${RETENTION_DAYS} days';
+SQL

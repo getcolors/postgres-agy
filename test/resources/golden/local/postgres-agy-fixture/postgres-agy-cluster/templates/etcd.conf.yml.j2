@@ -1,0 +1,20 @@
+name: {{ inventory_hostname }}
+data-dir: /var/lib/etcd
+
+listen-client-urls: http://{{ private_ip }}:2379,http://127.0.0.1:2379
+advertise-client-urls: http://{{ private_ip }}:2379
+
+listen-peer-urls: http://{{ private_ip }}:2380
+initial-advertise-peer-urls: http://{{ private_ip }}:2380
+
+initial-cluster-token: etcd-postgres-agy
+initial-cluster: >-
+{% for host in groups['postgres'] | sort %}
+  {{ host }}=http://{{ hostvars[host].private_ip }}:2380{{ '' if loop.last else ',' }}
+{% endfor %}
+initial-cluster-state: new
+
+auto-compaction-retention: '1'
+snapshot-count: 10000
+max-request-bytes: 1572864
+quota-backend-bytes: 8589934592
