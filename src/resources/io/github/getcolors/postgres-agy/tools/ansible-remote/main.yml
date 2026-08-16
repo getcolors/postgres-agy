@@ -345,6 +345,19 @@
       when: patroni_role in leader_roles
       changed_when: false
 
+    - name: Reset archiver statistics after stanza verification
+      become: true
+      become_user: postgres
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          export PGHOST=/var/run/postgresql
+          export PGPORT={{ pg_port }}
+          psql -X -q -v ON_ERROR_STOP=1 -c "SELECT pg_stat_reset_shared('archiver')" postgres
+      when: patroni_role in leader_roles
+      changed_when: false
+
     - name: Take the first full backup if the repository has none
       become: true
       become_user: postgres

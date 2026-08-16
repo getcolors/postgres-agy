@@ -102,7 +102,7 @@ fi
 
 # --- 6. PITR material is being archived continuously -----------------------
 archived=$(pg "$PRIMARY_PORT" 'SELECT archived_count FROM pg_stat_archiver')
-last_failed=$(pg "$PRIMARY_PORT" "SELECT coalesce(last_failed_wal, '')::text FROM pg_stat_archiver")
+last_failed=$(pg "$PRIMARY_PORT" "SELECT coalesce(last_failed_wal, '')::text FROM pg_stat_archiver WHERE last_failed_time >= coalesce(last_archived_time, '-infinity'::timestamptz)")
 archive_cmd=$(pg "$PRIMARY_PORT" "SELECT current_setting('archive_command')")
 if [ "${archived:-0}" -ge 1 ] 2>/dev/null && [ -z "$last_failed" ]; then
   ok "WAL archiving is continuous: $archived segments archived, none failed"
