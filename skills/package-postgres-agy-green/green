@@ -34,7 +34,7 @@
   1)
 
 ;; Managed by `bb pin` — do not edit by hand.
-(def ^:private postgres-agy-sha "d83d8d5db74f005b9804b3d20e5f7980f07ac285")
+(def ^:private postgres-agy-sha "525639c8aab881bb0fed313d821f75b926713831")
 
 (def ^:private postgres-agy-git-url "https://github.com/getcolors/postgres-agy.git")
 (def ^:private green-git-url "https://github.com/getcolors/green.git")
