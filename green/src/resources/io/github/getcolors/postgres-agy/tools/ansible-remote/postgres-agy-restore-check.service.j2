@@ -1,0 +1,10 @@
+[Unit]
+Description=postgres-agy verified restore drill
+After=patroni.service
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+ExecStart=/usr/local/bin/postgres-agy-restore-check
+TimeoutSec=1800

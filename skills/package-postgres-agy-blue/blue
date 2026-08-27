@@ -1,0 +1,61 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+#
+# Managed by `bb pin` — do not edit by hand, and never invent a SHA.
+#
+# UNPINNED: this launcher carries no postgres-agy pin. `bb pin` stamps the PEP
+# 723 block above with git sources once the repository is pushed; until then a
+# standalone copy fails loudly instead of resolving code from an invented
+# commit. Point it at a checkout meanwhile:
+# POSTGRES_AGY_LIB_ROOT=/path/to/postgres-agy
+"""Thin launcher for package-postgres-agy-blue.
+
+This file is both the skill payload and the repository entry point —
+blue/blue in the repository is a symlink to it. It deliberately holds no
+logic of its own: validation, the workflow DAG and the steps all live in the
+package-postgres-agy-blue library, where the test suite reaches them. A copied
+payload is the one place in this project where code cannot be tested, so
+nothing that can live elsewhere should live here.
+"""
+
+import os
+import subprocess
+import sys
+
+UNPINNED_ERROR = """\
+this launcher carries no postgres-agy pin.
+It has not been stamped by `bb pin`, which cannot run until the postgres-agy
+repository has been pushed.
+Point it at a checkout meanwhile: POSTGRES_AGY_LIB_ROOT=/path/to/postgres-agy
+(or run through the repository project: cd postgres-agy/blue && uv run python -m package_postgres_agy_blue ...)
+"""
+
+
+def _lib_root_project(root: str) -> str:
+    """The uv project inside a POSTGRES_AGY_LIB_ROOT checkout: the repository
+    root or its blue/ implementation both work."""
+    if os.path.isfile(os.path.join(root, "pyproject.toml")):
+        return root
+    return os.path.join(root, "blue")
+
+
+def main() -> None:
+    root = os.environ.get("POSTGRES_AGY_LIB_ROOT")
+    if root:
+        result = subprocess.run(
+            ["uv", "run", "--project", _lib_root_project(root),
+             "python", "-m", "package_postgres_agy_blue", *sys.argv[1:]])
+        raise SystemExit(result.returncode)
+    try:
+        from package_postgres_agy_blue import exec  # resolvable only once pinned
+    except ImportError:
+        sys.stderr.write(UNPINNED_ERROR)
+        raise SystemExit(2)
+    exec()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,9 @@
+[Unit]
+Description=postgres-agy verified restore drill timer
+
+[Timer]
+OnCalendar=<{ restore-check-oncalendar }>
+Persistent=true
+
+[Install]
+WantedBy=timers.target

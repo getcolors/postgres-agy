@@ -1,0 +1,473 @@
+---
+- name: Converge the <{ cluster-name }> PostgreSQL failover cluster
+  hosts: postgres
+  gather_facts: true
+  any_errors_fatal: true
+  vars:
+    pg_version: "<{ postgres-version }>"
+    pg_port: <{ postgres-port }>
+    patroni_port: <{ patroni-rest-port }>
+    etcd_client_port: <{ etcd-client-port }>
+    stanza: "<{ backup-stanza }>"
+    data_dir: "<{ postgres-data-dir }>"
+    bin_dir: "<{ postgres-bin-dir }>"
+    vpc_cidr: "<{ vpc-cidr }>"
+    leader_roles: ["leader", "master", "standby_leader"]
+
+  handlers:
+    - name: restart etcd
+      ansible.builtin.systemd_service:
+        name: etcd
+        state: restarted
+        daemon_reload: true
+
+    - name: reload patroni
+      ansible.builtin.systemd_service:
+        name: patroni
+        state: reloaded
+
+    - name: reload haproxy
+      ansible.builtin.systemd_service:
+        name: haproxy
+        state: reloaded
+
+  tasks:
+    - name: Wait for the node to accept SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+        sleep: 5
+
+    - name: Wait for cloud-init to finish before touching the package database
+      ansible.builtin.command:
+        cmd: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - acl
+          - ca-certificates
+          - curl
+          - gnupg
+          - jq
+          - python3-psycopg2
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: 300
+
+    - name: Install the PGDG repository signing key
+      ansible.builtin.get_url:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        dest: /etc/apt/trusted.gpg.d/pgdg.asc
+        mode: "0644"
+
+    - name: Enable the PGDG apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/etc/apt/trusted.gpg.d/pgdg.asc]
+          https://apt.postgresql.org/pub/repos/apt
+          {{ ansible_distribution_release }}-pgdg main
+        filename: pgdg
+        state: present
+        update_cache: true
+
+    - name: Install PostgreSQL, Patroni and pgBackRest
+      ansible.builtin.apt:
+        name:
+          - "postgresql-{{ pg_version }}"
+          - "postgresql-client-{{ pg_version }}"
+          - "patroni=<{ patroni-package-version }>"
+          - "pgbackrest=<{ pgbackrest-package-version }>"
+          - python3-etcd
+        state: present
+        lock_timeout: 300
+
+    - name: Hold Patroni and pgBackRest at the pinned versions
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - patroni
+        - pgbackrest
+      register: held
+      until: held is not failed
+      retries: 30
+      delay: 10
+
+    - name: Remove the packaged cluster that Patroni replaces
+      ansible.builtin.command:
+        cmd: "pg_dropcluster --stop {{ pg_version }} main"
+        removes: "/etc/postgresql/{{ pg_version }}/main/postgresql.conf"
+
+    - name: Disable the packaged PostgreSQL and Patroni units
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: false
+        state: stopped
+      loop:
+        - postgresql
+      failed_when: false
+
+    # --- the quorum store ---------------------------------------------------
+
+    - name: Create the etcd system user
+      ansible.builtin.user:
+        name: etcd
+        system: true
+        shell: /usr/sbin/nologin
+        home: /var/lib/etcd
+        create_home: false
+
+    - name: Create the etcd directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: etcd
+        group: etcd
+        mode: "0700"
+      loop:
+        - /var/lib/etcd
+        - /etc/etcd
+
+    - name: Create the versioned etcd install directory
+      ansible.builtin.file:
+        path: "/usr/local/lib/etcd-<{ etcd-version }>"
+        state: directory
+        mode: "0755"
+
+    - name: Download the pinned etcd release
+      ansible.builtin.get_url:
+        url: "<{ etcd-url }>"
+        dest: "/tmp/<{ etcd-tarball }>"
+        checksum: "sha256:<{ etcd-sha256 }>"
+        mode: "0644"
+
+    - name: Unpack the etcd binaries
+      ansible.builtin.unarchive:
+        src: "/tmp/<{ etcd-tarball }>"
+        remote_src: true
+        dest: "/usr/local/lib/etcd-<{ etcd-version }>"
+        extra_opts:
+          - --strip-components=1
+        creates: "/usr/local/lib/etcd-<{ etcd-version }>/etcd"
+
+    - name: Link the etcd binaries onto PATH
+      ansible.builtin.file:
+        src: "/usr/local/lib/etcd-<{ etcd-version }>/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        state: link
+        force: true
+      loop:
+        - etcd
+        - etcdctl
+
+    - name: Render the etcd configuration
+      ansible.builtin.template:
+        src: templates/etcd.conf.yml.j2
+        dest: /etc/etcd/etcd.conf.yml
+        owner: etcd
+        group: etcd
+        mode: "0640"
+      notify: restart etcd
+
+    - name: Install the etcd unit
+      ansible.builtin.template:
+        src: templates/etcd.service.j2
+        dest: /etc/systemd/system/etcd.service
+        mode: "0644"
+      notify: restart etcd
+
+    - name: Start etcd
+      ansible.builtin.systemd_service:
+        name: etcd
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Apply any pending etcd restart before waiting on the quorum
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for the etcd quorum to be healthy
+      ansible.builtin.command:
+        cmd: "etcdctl --endpoints=http://{{ private_ip }}:{{ etcd_client_port }} endpoint health"
+      register: etcd_health
+      until: etcd_health.rc == 0
+      retries: 40
+      delay: 5
+      changed_when: false
+
+    # --- backup repository configuration ------------------------------------
+
+    - name: Create the pgBackRest directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: "0750"
+      loop:
+        - /etc/pgbackrest
+        - /var/log/pgbackrest
+        - /var/lib/pgbackrest
+
+    - name: Render the pgBackRest configuration
+      ansible.builtin.template:
+        src: templates/pgbackrest.conf.j2
+        dest: /etc/pgbackrest/pgbackrest.conf
+        owner: postgres
+        group: postgres
+        mode: "0600"
+      no_log: true
+
+    # --- the cluster --------------------------------------------------------
+
+    - name: Create the Patroni configuration directory
+      ansible.builtin.file:
+        path: /etc/patroni
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: "0750"
+
+    - name: Create the PostgreSQL data root
+      ansible.builtin.file:
+        path: "/var/lib/postgresql/{{ pg_version }}"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: "0750"
+
+    - name: Render the Patroni configuration
+      ansible.builtin.template:
+        src: templates/patroni.yml.j2
+        dest: /etc/patroni/patroni.yml
+        owner: postgres
+        group: postgres
+        mode: "0600"
+      no_log: true
+      notify: reload patroni
+
+    - name: Install the Patroni unit
+      ansible.builtin.template:
+        src: templates/patroni.service.j2
+        dest: /etc/systemd/system/patroni.service
+        mode: "0644"
+
+    - name: Start Patroni
+      ansible.builtin.systemd_service:
+        name: patroni
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Apply any pending Patroni reload
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for this node's PostgreSQL to be running
+      ansible.builtin.uri:
+        url: "http://{{ private_ip }}:{{ patroni_port }}/health"
+        status_code: 200
+      register: patroni_health
+      until: patroni_health.status | default(0) == 200
+      retries: 90
+      delay: 5
+
+    - name: Wait for one leader and <{ cluster-nodes }> running members
+      ansible.builtin.uri:
+        url: "http://{{ private_ip }}:{{ patroni_port }}/cluster"
+        return_content: true
+      register: patroni_cluster
+      until: >-
+        (patroni_cluster.status | default(0)) == 200
+        and (patroni_cluster.json.members | selectattr('state', 'in', ['running', 'streaming']) | list | length) == <{ cluster-nodes }>
+        and (patroni_cluster.json.members | selectattr('role', 'in', leader_roles) | list | length) == 1
+      retries: 90
+      delay: 5
+
+    - name: Record this node's role and the cluster's leader
+      ansible.builtin.set_fact:
+        patroni_role: >-
+          {{ (patroni_cluster.json.members
+              | selectattr('name', 'equalto', inventory_hostname)
+              | map(attribute='role') | first) }}
+        patroni_leader: >-
+          {{ (patroni_cluster.json.members
+              | selectattr('role', 'in', leader_roles)
+              | map(attribute='name') | first) }}
+
+    - name: Report the resolved roles
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is {{ patroni_role }}; leader is {{ patroni_leader }}"
+
+    # --- leader-only bootstrap ----------------------------------------------
+
+    - name: Create the application database and the restore sentinel
+      become: true
+      become_user: postgres
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          export PGHOST=/var/run/postgresql
+          export PGPORT={{ pg_port }}
+          if ! psql -X -q -tAc "SELECT 1 FROM pg_database WHERE datname = '<{ postgres-database }>'" postgres | grep -q 1; then
+            psql -X -q -v ON_ERROR_STOP=1 -c 'CREATE DATABASE <{ postgres-database }>' postgres
+          fi
+          psql -X -q -v ON_ERROR_STOP=1 -d <{ postgres-database }> <<'SQL'
+          CREATE TABLE IF NOT EXISTS colors_restore_sentinel (
+            id      bigserial PRIMARY KEY,
+            token   text        NOT NULL,
+            node    text        NOT NULL,
+            written timestamptz NOT NULL DEFAULT now()
+          );
+          CREATE INDEX IF NOT EXISTS colors_restore_sentinel_token_idx
+            ON colors_restore_sentinel (token);
+          SQL
+      when: patroni_role in leader_roles
+      changed_when: false
+
+    - name: Create the pgBackRest stanza
+      become: true
+      become_user: postgres
+      ansible.builtin.command:
+        cmd: "pgbackrest --stanza={{ stanza }} stanza-create"
+      when: patroni_role in leader_roles
+      register: stanza_create
+      changed_when: "'already exists' not in (stanza_create.stderr | default(''))"
+
+    - name: Verify that WAL archiving reaches the repository
+      become: true
+      become_user: postgres
+      ansible.builtin.command:
+        cmd: "pgbackrest --stanza={{ stanza }} check"
+      when: patroni_role in leader_roles
+      changed_when: false
+
+    - name: Reset archiver statistics after stanza verification
+      become: true
+      become_user: postgres
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          export PGHOST=/var/run/postgresql
+          export PGPORT={{ pg_port }}
+          psql -X -q -v ON_ERROR_STOP=1 -c "SELECT pg_stat_reset_shared('archiver')" postgres
+      when: patroni_role in leader_roles
+      changed_when: false
+
+    - name: Take the first full backup if the repository has none
+      become: true
+      become_user: postgres
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          count=$(pgbackrest --stanza={{ stanza }} --output=json info | jq '[.[].backup[]] | length')
+          if [ "$count" -eq 0 ]; then
+            pgbackrest --stanza={{ stanza }} --type=full backup
+            echo CHANGED
+          fi
+      when: patroni_role in leader_roles
+      register: first_backup
+      changed_when: "'CHANGED' in (first_backup.stdout | default(''))"
+
+    # --- the client endpoint ------------------------------------------------
+
+    - name: Install HAProxy
+      ansible.builtin.apt:
+        name: haproxy
+        state: present
+
+    - name: Read the installed HAProxy version
+      ansible.builtin.command:
+        cmd: haproxy -v
+      register: haproxy_version
+      changed_when: false
+
+    - name: Assert the HAProxy series matches desired state
+      ansible.builtin.assert:
+        that:
+          - haproxy_version.stdout is search('HAProxy version <{ haproxy-version }>\\.')
+        fail_msg: >-
+          expected HAProxy <{ haproxy-version }>.x but found
+          {{ haproxy_version.stdout_lines | first }}
+
+    - name: Render the HAProxy configuration
+      ansible.builtin.template:
+        src: templates/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        mode: "0644"
+        validate: haproxy -c -f %s
+      notify: reload haproxy
+
+    - name: Start HAProxy
+      ansible.builtin.systemd_service:
+        name: haproxy
+        enabled: true
+        state: started
+
+    - name: Apply any pending HAProxy reload
+      ansible.builtin.meta: flush_handlers
+
+    # --- scheduled backup and verified restore ------------------------------
+
+    - name: Install the heartbeat, backup and restore-verification scripts
+      ansible.builtin.template:
+        src: "templates/{{ item }}.j2"
+        dest: "/usr/local/bin/{{ item }}"
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - postgres-agy-heartbeat
+        - postgres-agy-backup
+        - postgres-agy-restore-check
+
+    - name: Install the heartbeat, backup and restore-verification units
+      ansible.builtin.template:
+        src: "templates/{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        mode: "0644"
+      loop:
+        - postgres-agy-heartbeat.service
+        - postgres-agy-heartbeat.timer
+        - postgres-agy-backup.service
+        - postgres-agy-backup.timer
+        - postgres-agy-restore-check.service
+        - postgres-agy-restore-check.timer
+
+    - name: Enable the heartbeat, backup and restore-verification timers
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop:
+        - postgres-agy-heartbeat.timer
+        - postgres-agy-backup.timer
+        - postgres-agy-restore-check.timer
+
+    - name: Write the first heartbeat and archive it
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          /usr/local/bin/postgres-agy-heartbeat
+          sudo -n -u postgres pgbackrest --stanza={{ stanza }} check
+      when: patroni_role in leader_roles
+      changed_when: false
+
+    - name: Run the verified restore now, on the standbys
+      ansible.builtin.command:
+        cmd: /usr/local/bin/postgres-agy-restore-check
+      when: patroni_role not in leader_roles
+      throttle: 1
+      changed_when: false
+      register: restore_check
+
+    - name: Report the verified restore
+      ansible.builtin.debug:
+        msg: "{{ restore_check.stdout_lines | default(['skipped on the leader']) }}"

@@ -1,0 +1,25 @@
+[global]
+repo1-type=s3
+repo1-s3-bucket=<{ backup-r2-bucket }>
+repo1-s3-endpoint=<{ backup-r2-s3-endpoint }>
+repo1-s3-region=<{ backup-r2-region }>
+repo1-s3-uri-style=path
+repo1-s3-key={{ lookup('env', 'COLORS_PAR_BACKUP_R2_ACCESS_KEY_ID') }}
+repo1-s3-key-secret={{ lookup('env', 'COLORS_PAR_BACKUP_R2_SECRET_ACCESS_KEY') }}
+repo1-path=<{ backup-repo-path }>
+
+repo1-retention-full=<{ backup-retention-full }>
+repo1-retention-full-type=count
+
+compress-type=zst
+compress-level=3
+process-max=2
+start-fast=y
+log-level-console=info
+log-level-file=detail
+log-path=/var/log/pgbackrest
+
+[<{ backup-stanza }>]
+pg1-path=<{ postgres-data-dir }>
+pg1-port=<{ postgres-port }>
+pg1-socket-path=/var/run/postgresql

@@ -11,8 +11,8 @@
 ;; backup repository path, and cloud resources; overriding it from the environment
 ;; could point this deployment at another project's state.
 ;;
-;; This file is both the skill payload and the repository entry point — ./green
-;; in the project root is a symlink to it. It deliberately holds no logic of its
+;; This file is both the skill payload and the repository entry point — green/green
+;; in the repository is a symlink to it. It deliberately holds no logic of its
 ;; own: validation, the workflow DAG and the steps all live in the library,
 ;; where the test suite reaches them.
 
@@ -34,7 +34,12 @@
   1)
 
 ;; Managed by `bb pin` — do not edit by hand.
-(def ^:private postgres-agy-sha "525639c8aab881bb0fed313d821f75b926713831")
+;;
+;; nil before this repository's tri-colour layout has been pushed and stamped:
+;; a launcher that cannot resolve its own library says so rather than inventing
+;; a SHA or silently falling back to whatever is lying around. `bb pin` refuses
+;; to stamp a dirty or unpushed HEAD for the same reason.
+(def ^:private postgres-agy-sha nil)
 
 (def ^:private postgres-agy-git-url "https://github.com/getcolors/postgres-agy.git")
 (def ^:private green-git-url "https://github.com/getcolors/green.git")
@@ -42,7 +47,7 @@
 (defn- lib-coord
   [env-var url sha deps-root]
   (if-let [root (System/getenv env-var)]
-    {:local/root root}
+    {:local/root (if deps-root (str (io/file root deps-root)) root)}
     (when sha
       (cond-> {:git/url url :git/sha sha}
         deps-root (assoc :deps/root deps-root)))))
@@ -52,7 +57,7 @@
 
 (def ^:private bootstrap-error
   (when (and (System/getProperty "babashka.version") (not resolved?))
-    (let [postgres-agy (lib-coord "POSTGRES_AGY_LIB_ROOT" postgres-agy-git-url postgres-agy-sha nil)
+    (let [postgres-agy (lib-coord "POSTGRES_AGY_LIB_ROOT" postgres-agy-git-url postgres-agy-sha "green")
           green (lib-coord "GREEN_LIB_ROOT" green-git-url nil nil)]
       (if-not postgres-agy
         (str "this launcher carries no postgres-agy pin.\n"

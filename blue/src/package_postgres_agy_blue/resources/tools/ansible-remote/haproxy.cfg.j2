@@ -1,0 +1,45 @@
+global
+    log /dev/log local0
+    maxconn 2000
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log     global
+    mode    tcp
+    retries 2
+    option  dontlognull
+    timeout client  30m
+    timeout server  30m
+    timeout connect 5s
+    timeout check   5s
+    timeout queue   30s
+
+listen stats
+    mode http
+    bind 127.0.0.1:<{ haproxy-stats-port }>
+    stats enable
+    stats uri /
+    stats refresh 5s
+
+listen primary
+    bind {{ ansible_host }}:<{ haproxy-primary-port }>
+    bind 127.0.0.1:<{ haproxy-primary-port }>
+    option httpchk GET /primary
+    http-check expect status 200
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+{% for host in groups['postgres'] | sort %}
+    server {{ host }} {{ hostvars[host].private_ip }}:<{ postgres-port }> maxconn 200 check port <{ patroni-rest-port }>
+{% endfor %}
+
+listen replica
+    bind {{ ansible_host }}:<{ haproxy-replica-port }>
+    bind 127.0.0.1:<{ haproxy-replica-port }>
+    option httpchk GET /replica
+    http-check expect status 200
+    balance roundrobin
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+{% for host in groups['postgres'] | sort %}
+    server {{ host }} {{ hostvars[host].private_ip }}:<{ postgres-port }> maxconn 200 check port <{ patroni-rest-port }>
+{% endfor %}

@@ -1,0 +1,23 @@
+---
+- name: Manage local access to the <{ cluster-name }> cluster
+  hosts: local
+  gather_facts: false
+  tasks:
+    - name: Manage the SSH alias for each node
+      ansible.builtin.blockinfile:
+        path: ~/.ssh/config
+        marker: "# {mark} postgres-agy {{ item.alias }} ANSIBLE MANAGED BLOCK"
+        state: "{{ block_state | default('present') }}"
+        create: true
+        mode: "0600"
+        block: |
+          Host {{ item.alias }}
+              HostName {{ item['public-ip'] }}
+              User root
+              Port 22
+              IdentityFile {{ ssh_private_key }}
+              StrictHostKeyChecking accept-new
+              ForwardAgent no
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.alias }}"

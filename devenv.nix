@@ -5,10 +5,12 @@
   packages = with pkgs; [
     ansible
     babashka
+    bun
     curl
     doctl
     jq
     openssh
     postgresql
+    uv
   ];
 }
