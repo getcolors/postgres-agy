@@ -1,16 +1,17 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = ["package-postgres-agy-blue", "blue"]
+#
+# [tool.uv.sources]
+# package-postgres-agy-blue = { git = "https://github.com/getcolors/postgres-agy.git", rev = "a536c8e26e591403b3a8f9f96e7d6967b79fb8ed", subdirectory = "blue" }
+# blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
 # ///
 #
 # Managed by `bb pin` — do not edit by hand, and never invent a SHA.
 #
-# UNPINNED: this launcher carries no postgres-agy pin. `bb pin` stamps the PEP
-# 723 block above with git sources once the repository is pushed; until then a
-# standalone copy fails loudly instead of resolving code from an invented
-# commit. Point it at a checkout meanwhile:
-# POSTGRES_AGY_LIB_ROOT=/path/to/postgres-agy
+# Stamped by `bb pin`. POSTGRES_AGY_LIB_ROOT=/path/to/postgres-agy still overrides the
+# pin with a working tree.
 """Thin launcher for package-postgres-agy-blue.
 
 This file is both the skill payload and the repository entry point —

@@ -36,7 +36,7 @@ import { homedir } from "node:os";
 // directory, which would halt Bun's upward resolution of `package-postgres-agy-red`
 // and break the development symlink at red/red.
 const PINS = {
-  "package-postgres-agy-red": null,
+  "package-postgres-agy-red": "github:getcolors/postgres-agy#a536c8e26e591403b3a8f9f96e7d6967b79fb8ed",
   "red": "github:getcolors/red#db9bfe61282e2093f4098bf5a6ee0cd10added6e",
 };
 
