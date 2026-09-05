@@ -4,7 +4,7 @@
 # dependencies = ["package-postgres-agy-blue", "blue"]
 #
 # [tool.uv.sources]
-# package-postgres-agy-blue = { git = "https://github.com/getcolors/postgres-agy.git", rev = "8fcdbab908a0035c02669bb0b7e77aa749de127f", subdirectory = "blue" }
+# package-postgres-agy-blue = { git = "https://github.com/getcolors/postgres-agy.git", rev = "3a4b4fc0ff805bcb9a1b877cef6d504e6aa2c5c6", subdirectory = "blue" }
 # blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
 #
 # [tool.uv]
