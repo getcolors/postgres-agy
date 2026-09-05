@@ -44,7 +44,7 @@ for fixture in colors optout; do
   done
 done
 
-diff -r "$root/green/src/resources/io/github/getcolors/postgres_agy" "$root/red/resources"
-diff -r "$root/green/src/resources/io/github/getcolors/postgres_agy" "$root/blue/src/package_postgres_agy_blue/resources"
+diff -r "$root/green/src/resources/io/github/getcolors/postgres-agy" "$root/red/resources"
+diff -r "$root/green/src/resources/io/github/getcolors/postgres-agy" "$root/blue/src/package_postgres_agy_blue/resources"
 
 echo "green, red, and blue postgres-agy artifacts are byte-identical"
