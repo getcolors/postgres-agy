@@ -12,3 +12,10 @@ A three-node PostgreSQL 17 high-availability failover cluster on DigitalOcean wi
 Three interchangeable implementations of the same package: canonical
 Clojure/Babashka in `green/`, TypeScript/Bun in `red/`, and Python/uv in
 `blue/`. `scripts/parity.sh` proves they render byte-identical artifacts.
+
+The operator verbs (`status`, `switchover`, `failover`, `backup`,
+`verify-restore`, `psql`) reach the nodes through the `~/.ssh/config` aliases
+the local stage writes — `<profile>` for node 1 and `<profile>-0`,
+`<profile>-1`, `<profile>-2` for each node, the Compute Cluster Standard's
+names, which replaced the `<profile>-1..3` aliases the package wrote before it
+adopted the standard.

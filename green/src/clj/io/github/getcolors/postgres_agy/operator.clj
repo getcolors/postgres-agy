@@ -11,6 +11,7 @@
             [clojure.string :as str]
             [green.cli :as green-cli]
             [green.process :as process]
+            [io.github.getcolors.postgres-agy.tools :as tools]
             [io.github.getcolors.postgres-agy.utils :as utils]
             [io.github.getcolors.postgres-agy.validate :as validate]))
 
@@ -53,7 +54,7 @@
   [opts ordinal remote tty?]
   (concat ["ssh" "-F" (str (io/file (System/getProperty "user.home") ".ssh/config"))]
           (when tty? ["-t"])
-          ["--" (utils/ssh-alias opts ordinal)
+          ["--" (tools/ssh-alias opts ordinal)
            (str/join " " (map process/posix-quote remote))]))
 
 (defn command

@@ -28,6 +28,11 @@
 
 ;; ---------------------------------------------------------------------------
 ;; Dependency bootstrap
+;;
+;; A standalone copy resolves `postgres-agy` as an immutable git dependency and
+;; lets tools.deps pull `green` and `once` transitively from its deps.edn.
+;; POSTGRES_AGY_LIB_ROOT, GREEN_LIB_ROOT and ONCE_LIB_ROOT each replace a pin
+;; with a working tree.
 
 (def ^:private launcher-contract
   "Minimum io.github.getcolors.postgres-agy contract this launcher requires."
@@ -43,6 +48,7 @@
 
 (def ^:private postgres-agy-git-url "https://github.com/getcolors/postgres-agy.git")
 (def ^:private green-git-url "https://github.com/getcolors/green.git")
+(def ^:private once-git-url "https://github.com/getcolors/once.git")
 
 (defn- lib-coord
   [env-var url sha deps-root]
@@ -58,7 +64,8 @@
 (def ^:private bootstrap-error
   (when (and (System/getProperty "babashka.version") (not resolved?))
     (let [postgres-agy (lib-coord "POSTGRES_AGY_LIB_ROOT" postgres-agy-git-url postgres-agy-sha "green")
-          green (lib-coord "GREEN_LIB_ROOT" green-git-url nil nil)]
+          green (lib-coord "GREEN_LIB_ROOT" green-git-url nil nil)
+          once (lib-coord "ONCE_LIB_ROOT" once-git-url nil "green")]
       (if-not postgres-agy
         (str "this launcher carries no postgres-agy pin.\n"
              "It has not been stamped by `bb pin`, which cannot run until the "
@@ -66,7 +73,8 @@
              "Point it at a checkout meanwhile: POSTGRES_AGY_LIB_ROOT=/path/to/postgres-agy")
         (do ((requiring-resolve 'babashka.deps/add-deps)
              {:deps (cond-> {'io.github.getcolors/postgres-agy postgres-agy}
-                      green (assoc 'io.github.getcolors/green green))})
+                      green (assoc 'io.github.getcolors/green green)
+                      once (assoc 'io.github.getcolors/once once))})
             nil)))))
 
 (def ^:private load-error

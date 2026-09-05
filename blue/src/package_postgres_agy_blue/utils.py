@@ -2,9 +2,10 @@
 io.github.getcolors.postgres-agy.utils.
 
 Everything here is a pure function of desired state. The topology is derived
-rather than configured: three nodes with stable ordinals, stable Ansible
-aliases, and stable droplet names, so an OpenTofu address and an inventory
-host name never move because a list was reordered."""
+rather than configured: three nodes with stable ordinals and stable droplet
+names, so an OpenTofu address and an inventory host name never move because
+a list was reordered. The `~/.ssh/config` aliases are the Compute Cluster
+Standard's, derived by ONCE and wrapped in `tools.ssh_alias`."""
 
 from __future__ import annotations
 
@@ -26,8 +27,8 @@ def ordinals() -> list[int]:
 
 
 def base_name(opts: dict) -> str:
-    value = opts.get("digitalocean-name")
-    return str(value) if value is not None and str(value) else "postgres-agy"
+    name = str(opts.get("digitalocean-name") or "")
+    return name if name else "postgres-agy"
 
 
 def node_name(opts: dict, n: int) -> str:
@@ -37,33 +38,23 @@ def node_name(opts: dict, n: int) -> str:
     return f"{base_name(opts)}-{n}"
 
 
-def profile_alias(opts: dict) -> str:
-    value = opts.get("profile")
-    return str(value) if value is not None and str(value) else "postgres-agy"
-
-
-def ssh_alias(opts: dict, n: int) -> str:
-    """The `~/.ssh/config` Host entry the operator commands use for ordinal `n`."""
-    return f"{profile_alias(opts)}-{n}"
-
-
 def par_lookup(key: str) -> str:
     """The Ansible expression that reads a credential at play time.
 
     Rendered into generated files instead of the value, so a secret reaches a
     host through the process environment and never through a file on disk
     here."""
-    return "{{ lookup('env','COLORS_PAR_%s') }}" % key.replace("-", "_").upper()
+    return "{{ lookup('env','COLORS_PAR_%s') }}" % str(key).replace("-", "_").upper()
 
 
 def endpoint_host(endpoint) -> str:
     """The S3 endpoint host pgBackRest wants: it takes a bare host, not a URL."""
-    s = str(endpoint) if endpoint is not None else ""
-    s = re.sub(r"^https?://", "", s)
-    return re.sub(r"/.*$", "", s)
+    text = "" if endpoint is None else str(endpoint)
+    text = re.sub(r"^https?://", "", text)
+    return re.sub(r"/.*$", "", text)
 
 
 def repo_path(prefix) -> str:
     """pgBackRest's repository path is absolute inside the bucket."""
-    p = re.sub(r"^/+", "", str(prefix) if prefix is not None else "")
+    p = re.sub(r"^/+", "", "" if prefix is None else str(prefix))
     return "/" if not p.strip() else f"/{p}"

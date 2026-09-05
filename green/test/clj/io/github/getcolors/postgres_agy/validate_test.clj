@@ -2,6 +2,7 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [green.cli :as green-cli]
+            [io.github.getcolors.once.compute-cluster :as cluster]
             [io.github.getcolors.postgres-agy.validate :as validate]))
 
 (def base
@@ -53,13 +54,62 @@
     (is (empty? (validate/state-errors (assoc base :postgres-port 5432 :haproxy-primary-port 5432))))))
 
 (deftest cidr-validation-test
-  (testing "valid CIDRs accepted"
-    (is (validate/valid-cidr? "10.0.0.0/16"))
-    (is (validate/valid-cidr? "192.168.1.1/32")))
+  ;; The list and CIDR checks are ONCE's, with its messages; the refusal of the
+  ;; world is this package's own and holds however the list is spelled.
+  (doseq [k [:digitalocean-ssh-sources :digitalocean-client-sources]]
+    (testing (str k)
+      (is (= [(str k " must not contain 0.0.0.0/0; administrative and database ingress stay scoped")]
+             (validate/state-errors (assoc base k ["0.0.0.0/0"]))))
+      (is (some #(re-find #"must not contain 0.0.0.0/0" %)
+                (validate/state-errors (assoc base k "129.159.242.163/32, 0.0.0.0/0"))))
+      (is (= [(str k " must list at least one CIDR")]
+             (validate/state-errors (assoc base k []))))
+      (is (= [(str k " entry \"10.0.0.1\" is not an IPv4 or IPv6 CIDR")]
+             (validate/state-errors (assoc base k ["10.0.0.1"]))))))
+  (testing "a string is a list, the way an overlay carries one"
+    (is (empty? (validate/state-errors (assoc base :digitalocean-ssh-sources "10.0.0.0/16, 192.168.1.1/32"))))))
 
-  (testing "0.0.0.0/0 rejected in ssh and client sources"
-    (is (seq (validate/state-errors (assoc base :digitalocean-ssh-sources ["0.0.0.0/0"]))))
-    (is (seq (validate/state-errors (assoc base :digitalocean-client-sources ["0.0.0.0/0"]))))))
+(deftest the-spec-describes-one-homogeneous-role-on-a-discovered-network
+  ;; The Compute Cluster Standard's spec is data ONCE reads; this is the one
+  ;; place its content is asserted, so a drift in any colour is a test
+  ;; failure and not a rendered surprise.
+  (is (= [] (cluster/spec-errors validate/spec)))
+  (is (= ["digitalocean"] (keys (:registry validate/spec))))
+  (is (= "digitalocean" (:default validate/spec)))
+  (is (= {:mode :discovered} (get-in validate/spec [:registry "digitalocean" :network])))
+  (is (= {:non-empty ["ssh-sources" "client-sources"] :may-be-empty []} (:sources validate/spec)))
+  (is (= [{:role nil :count-key :cluster-nodes :count 3 :fallback-offset 11}]
+         (:roles validate/spec)))
+  (is (nil? (:entry validate/spec)) "the bare profile alias reaches node 0")
+  (is (= "10.114.0.0/20" (:fallback-subnet validate/spec)))
+  (is (= [] (cluster/topology-errors validate/spec base)))
+  (testing "the registry's required keys are demanded through ONCE"
+    (doseq [k (get-in validate/compute-providers ["digitalocean" :required])]
+      (is (some #(re-find (re-pattern (str k " is required")) %)
+                (validate/state-errors (dissoc base k)))
+          (str k)))))
+
+(deftest the-vpc-is-discovered-and-cannot-be-described
+  (doseq [k validate/forbidden-vpc-keys]
+    (is (some #(re-find #"must not be configured; the regional default VPC is discovered" %)
+              (validate/state-errors (assoc base k "10.0.0.0/16")))
+        (str k)))
+  (testing "the two spellings ONCE knows are refused by its discovered-network
+            rule, once, with its message"
+    (is (= [":digitalocean-vpc-uuid must be absent; the default regional VPC is discovered at runtime"]
+           (validate/state-errors (assoc base :digitalocean-vpc-uuid "00000000-0000-0000-0000-000000000000"))))
+    (is (= [":digitalocean-vpc-cidr must be absent; this package must not create a VPC"]
+           (validate/state-errors (assoc base :digitalocean-vpc-cidr "10.114.0.0/20")))))
+  (is (some #(re-find #":digitalocean-vpc-mode must be default" %)
+            (validate/state-errors (assoc base :digitalocean-vpc-mode "explicit")))))
+
+(deftest the-count-and-the-provider-are-checked-by-once-too
+  (is (some #{":cluster-nodes must be a positive integer"}
+            (validate/state-errors (assoc base :cluster-nodes "3"))))
+  (is (some #{":provider-compute must be one of digitalocean"}
+            (validate/state-errors (assoc base :provider-compute "hcloud"))))
+  (is (some #(re-find #"unsupported :provider-dns" %)
+            (validate/state-errors (assoc base :provider-dns "yandex")))))
 
 (deftest secrets-validation-test
   (testing "secret errors reported when credentials missing"

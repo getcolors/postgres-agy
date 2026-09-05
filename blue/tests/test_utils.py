@@ -15,11 +15,6 @@ def test_node_naming():
     assert utils.node_name({"digitalocean-name": "my-pg"}, 2) == "my-pg-2"
 
 
-def test_ssh_alias():
-    assert utils.ssh_alias({"profile": "postgres-agy"}, 1) == "postgres-agy-1"
-    assert utils.ssh_alias({"profile": "my-pg"}, 2) == "my-pg-2"
-
-
 def test_par_lookup_formatting():
     assert (utils.par_lookup("postgres-admin-password")
             == "{{ lookup('env','COLORS_PAR_POSTGRES_ADMIN_PASSWORD') }}")

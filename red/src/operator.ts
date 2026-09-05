@@ -15,6 +15,7 @@ import { readPars } from "red/cli";
 import { posixQuote, runInherit } from "red/process";
 import type { ExecResult } from "red/runtime";
 import type { Opts } from "red/workflow";
+import * as tools from "./tools.ts";
 import * as utils from "./utils.ts";
 import * as validate from "./validate.ts";
 
@@ -60,7 +61,7 @@ export function sshCommand(opts: Opts, ordinal: number, remote: string[], tty: b
   return [
     "ssh", "-F", join(homedir(), ".ssh/config"),
     ...(tty ? ["-t"] : []),
-    "--", utils.sshAlias(opts, ordinal),
+    "--", tools.sshAlias(opts, ordinal),
     remote.map(posixQuote).join(" "),
   ];
 }

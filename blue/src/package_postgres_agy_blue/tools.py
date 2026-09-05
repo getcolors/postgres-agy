@@ -5,13 +5,17 @@ io.github.getcolors.postgres-agy.tools.
 Every stage renders into `.colors/<profile>/<stage>/` and, for the OpenTofu
 ones, keys its remote state at `<profile>/<stage>.tfstate`. Those two names
 are the deployment's identity; changing either orphans live infrastructure,
-so they are constants here and asserted by the golden suite."""
+so they are constants here and asserted by the golden suite.
+
+The cluster itself — which machines exist, at which addresses — is the
+Compute Cluster Standard's `params`, adopted through ONCE's `compute_cluster`
+module and carried under `once/cluster`. This package puts its own facts
+inside it: `vpc_id` and `vpc_ip_range` at the top level."""
 
 from __future__ import annotations
 
 import json
 import math
-import re
 from decimal import Decimal
 from pathlib import Path
 
@@ -22,6 +26,8 @@ from blue.providers import tool_env
 from blue.runtime import runtime
 from blue.scaffold import PRESERVE_JINJA_DELIMITERS, content_spec, scaffold
 from blue.workflow import StepError, failed
+from package_once_blue import compute as once_compute
+from package_once_blue import compute_cluster as cluster
 
 from . import utils, validate
 
@@ -64,57 +70,85 @@ def backend_credential_env(opts: dict) -> dict[str, str] | None:
     return credential_env(opts)
 
 
-def cidrs(opts: dict, key: str) -> list[str]:
-    value = opts.get(key)
-    xs = value if isinstance(value, list) else re.split(r"[,\s]+", str(value))
-    return [s for s in (str(x).strip() for x in xs) if s]
+def backend_advice(tool: str):
+    """The state backend of one OpenTofu stage, written before the stage
+    runs. `dir` and `key` are explicit so the state addresses cannot move."""
+    return tofu.conventional_backend_advice(
+        dir=lambda o, tool=tool: tool_dir(o, tool),
+        key=lambda o, tool=tool: f"{o.get('profile')}/{tool}.tfstate")
+
+
+def _refuse(opts: dict, errors: list[str]) -> dict:
+    return {**opts, "blue/exit": 1, "blue/err": "\n".join(errors)}
 
 
 # ---------------------------------------------------------------------------
 # Placeholder topology
+#
+# `build` renders the whole tree without contacting a provider, so it needs
+# values that are obviously not real. The nodes are ONCE's fallbacks — RFC
+# 5737 TEST-NET-1 public addresses and RFC 1918 private ones cut from `spec`'s
+# subnet at offset 11 — and the network facts beside them are the stand-ins
+# below. A golden file that leaked into a real run fails loudly rather than
+# pointing at somebody's host, and the goldens stay a pure function of
+# colors.yml.
 
 fallback_outputs = {
     "vpc_id": "00000000-0000-0000-0000-000000000000",
     "vpc_ip_range": "10.114.0.0/20",
-    "node_public_ips": ["192.0.2.11", "192.0.2.12", "192.0.2.13"],
-    "node_private_ips": ["10.114.0.11", "10.114.0.12", "10.114.0.13"],
 }
 
 
-def _output_map(result: dict) -> dict | None:
-    return result.get("postgres-agy/outputs")
+def _cluster_nodes(opts: dict) -> list[dict]:
+    """ONCE's nodes for this deployment: the adopted `params.nodes` on a real
+    run, the fallbacks on a build — renamed to what this package has always
+    called its nodes, `<name>-<ordinal>`, so the rendered inventory is
+    byte-identical to what it was."""
+    params = opts.get("once/cluster")
+    nodes = cluster.nodes(validate.spec, opts, params)
+    if params is not None:
+        return list(nodes)
+    return [{**node, "name": utils.node_name(opts, node["index"] + 1)} for node in nodes]
+
+
+def ssh_alias(opts: dict, n: int) -> str:
+    """The `~/.ssh/config` Host entry the operator commands use for ordinal
+    `n`: ONCE's `<profile>-<index>`, the Compute Cluster Standard's alias for
+    the node at 0-based `index`. ONCE's list opens with the bare profile, so
+    the 1-based ordinal is also the position of its node's alias."""
+    return cluster.aliases(validate.spec, opts)[n]
 
 
 def nodes(opts: dict) -> list[dict]:
-    """The rendered topology: one map per ordinal, joined with whatever
-    addresses the infrastructure stage produced (or the placeholders, before
-    it has run)."""
-    fallback_public = fallback_outputs["node_public_ips"]
-    fallback_private = fallback_outputs["node_private_ips"]
-    public = list(opts.get("node_public_ips") or fallback_public)
-    private = list(opts.get("node_private_ips") or fallback_private)
-    result = []
-    for n in utils.ordinals():
-        i = n - 1
-        result.append({
-            "ordinal": n,
-            "name": utils.node_name(opts, n),
-            "alias": utils.ssh_alias(opts, n),
-            "public-ip": public[i] if i < len(public) else fallback_public[i],
-            "private-ip": private[i] if i < len(private) else fallback_private[i],
+    """The rendered topology: one map per ordinal over the node ONCE reports
+    — the adopted cluster on a real run, the placeholders before the
+    infrastructure stage has run. Pure: given the same opts it is the same
+    list, which is what makes the inventory and the goldens deterministic."""
+    members = []
+    for node in _cluster_nodes(opts):
+        ordinal = node["index"] + 1
+        members.append({
+            "ordinal": ordinal,
+            "name": node.get("name"),
+            "alias": ssh_alias(opts, ordinal),
+            "public-ip": node.get("ip"),
+            "private-ip": node.get("vpc_ip"),
         })
-    return result
+    return members
 
 
 # ---------------------------------------------------------------------------
 # Stage 1 — infrastructure
 
+
 def infrastructure_data(opts: dict) -> dict:
-    return {**opts,
-            "node-names-hcl": tofu.hcl_list([utils.node_name(opts, n) for n in utils.ordinals()]),
-            "ssh-keys-hcl": tofu.hcl_list(cidrs(opts, "digitalocean-ssh-keys")),
-            "ssh-sources-hcl": tofu.hcl_list(cidrs(opts, "digitalocean-ssh-sources")),
-            "client-sources-hcl": tofu.hcl_list(cidrs(opts, "digitalocean-client-sources"))}
+    return {
+        **opts,
+        "node-names-hcl": tofu.hcl_list([utils.node_name(opts, n) for n in utils.ordinals()]),
+        "ssh-keys-hcl": tofu.hcl_list(once_compute.cidrs(opts, "digitalocean-ssh-keys")),
+        "ssh-sources-hcl": tofu.hcl_list(once_compute.cidrs(opts, "digitalocean-ssh-sources")),
+        "client-sources-hcl": tofu.hcl_list(once_compute.cidrs(opts, "digitalocean-client-sources")),
+    }
 
 
 def infrastructure_specs(opts: dict) -> list[dict]:
@@ -123,44 +157,159 @@ def infrastructure_specs(opts: dict) -> list[dict]:
                  infrastructure_data(opts))]
 
 
+def output_params(result: dict) -> dict | None:
+    """The compute stage's `params` output, as ONCE reads it; None when the
+    apply reported none."""
+    return cluster.output_params({"tofu/outputs": result.get("postgres-agy/outputs")})
+
+
+def _non_blank(v) -> bool:
+    return isinstance(v, str) and v.strip() != ""
+
+
+def params_errors(params: dict) -> list[str]:
+    """The extension keys this package puts inside `params`, which ONCE
+    preserves but does not read: a non-blank `vpc_id` and a canonical
+    `vpc_ip_range`, the network every etcd, Patroni and firewall rule is
+    scoped to. A real run is refused without them; the legacy translation is
+    held to the same rule."""
+    errors: list[str] = []
+    if not _non_blank(params.get("vpc_id")):
+        errors.append("compute state carries no vpc_id")
+    if not _non_blank(params.get("vpc_ip_range")):
+        errors.append("compute state carries no vpc_ip_range")
+    elif not cluster.ipv4_network(params.get("vpc_ip_range")):
+        errors.append(f"compute state vpc_ip_range {json.dumps(params.get('vpc_ip_range'))}"
+                      " is not a canonical IPv4 network such as 10.40.0.0/24")
+    return errors
+
+
+def _checked(opts: dict) -> dict:
+    """`opts` once the adopted cluster passes `params_errors`, or the refusal."""
+    errors = params_errors(opts["once/cluster"]) if "once/cluster" in opts else []
+    return _refuse(opts, errors) if errors else opts
+
+
+def resolve_infrastructure(opts: dict, result: dict) -> dict:
+    """What the infrastructure stage hands on after its apply: `result` as it
+    is on a failure, a delete or a build, and otherwise ONCE's
+    `resolved_cluster` over the apply's `params` output — None outputs and a
+    partial cluster are refused there — checked against `params_errors`.
+    Pure, so the wiring is testable without an apply."""
+    if failed(result):
+        return result
+    if opts.get("blue/event") in ("delete", "build"):
+        return result
+    resolved = cluster.resolved_cluster(validate.spec, opts, result, {}, output_params(result))
+    return resolved if failed(resolved) else _checked(resolved)
+
+
 async def infrastructure_step(opts: dict) -> dict:
     result = await tofu.tofu_with_spec(
         opts, infrastructure_specs(opts),
         dir=tool_dir(opts, infrastructure_tool),
         env=credential_env(opts, "provider-compute"),
         output_key="postgres-agy/outputs")
-    if failed(result):
-        return result
-    if opts.get("blue/event") == "delete":
-        return result
-    if opts.get("blue/event") == "build":
-        return {**result, **fallback_outputs}
-    return {**result, **fallback_outputs, **(_output_map(result) or {})}
+    return resolve_infrastructure(opts, result)
 
 
-async def load_infrastructure_step(opts: dict) -> dict:
-    """Read node addresses out of remote state without planning or mutating
-    cloud resources."""
+def legacy_params(opts: dict, outputs: dict) -> dict:
+    """A state written before this package recorded `params`: the parallel
+    `node_public_ips` and `node_private_ips` lists, zipped into the nodes the
+    standard describes, with `vpc_id` and `vpc_ip_range` copied and the names
+    this package has always given its nodes. Refused, as the SDK's
+    `StepError`, when the two lists disagree with each other or with
+    `cluster-nodes` — guessing which droplet is which is how a delete destroys
+    around a node — and when no `vpc_id` or `vpc_ip_range` was recorded. The
+    range's form is `params_errors`' to check, the same way for a legacy and
+    a recorded state."""
+    def as_list(v) -> list:
+        return list(v) if isinstance(v, (list, tuple)) else []
+
+    publics = as_list(outputs.get("node_public_ips"))
+    privates = as_list(outputs.get("node_private_ips"))
+    n = opts.get("cluster-nodes")
+    if not (n == len(publics) == len(privates)):
+        raise StepError(f"legacy state lists {len(publics)} public addresses and "
+                        f"{len(privates)} private addresses; refusing to guess the cluster")
+    for k in ("vpc_id", "vpc_ip_range"):
+        if not _non_blank(outputs.get(k)):
+            raise StepError(f"legacy state carries no {k}")
+    return {"provider": validate.default_compute_provider,
+            "vpc_id": outputs.get("vpc_id"),
+            "vpc_ip_range": outputs.get("vpc_ip_range"),
+            "nodes": [{"index": i,
+                       "role": None,
+                       "name": utils.node_name(opts, i + 1),
+                       "ip": publics[i],
+                       "vpc_ip": privates[i],
+                       "user": "root",
+                       "sudoer": "root"}
+                      for i in range(n)]}
+
+
+async def state_output(opts: dict) -> dict | None:
+    """The reader ONCE's `read_state` takes: the compute `params` recorded in
+    the infrastructure state, None when the state is readable and holds
+    nothing, and the legacy translation when it holds only the pre-adoption
+    outputs. Delete needs the cluster before it destroys anything — the local
+    SSH configuration is keyed by it — and a `plan` at that moment would be a
+    second chance to change infrastructure on the way to removing it; nor can
+    a fresh clone re-derive it, so the stage is rendered, its backend written
+    and initialized here, before the read. A failed initialization raises the
+    SDK's `StepError`, the shape `blue.tofu` raises on an unreadable backend;
+    `read_state` reports both fail-closed. Kept local, and looked up on this
+    module at call time, so tests can replace it."""
     dir = tool_dir(opts, infrastructure_tool)
-    rendered = {**scaffold({**opts, "blue/event": "build"}, infrastructure_specs(opts)),
-                "blue/event": opts.get("blue/event")}
     credentials = credential_env(opts, "provider-compute")
+    scaffold({**opts, "blue/event": "build"}, infrastructure_specs(opts))
+    backend_advice(infrastructure_tool)(opts)
     init = await runtime.exec(
         ["tofu", f"-chdir={dir}", "init", "-input=false", "-no-color"],
         env=credentials)
     if init.exit != 0:
-        return process_result(rendered, "infrastructure state initialization", init)
-    try:
-        outputs = await tofu.outputs(dir, credentials)
-        return {**rendered, **fallback_outputs, **outputs,
-                "postgres-agy/infrastructure-present?": "node_public_ips" in outputs}
-    except Exception as t:  # noqa: BLE001 — mirror green's Throwable net
-        return {**rendered, "blue/exit": 1,
-                "blue/err": f"infrastructure state output failed: {t or type(t).__name__}"}
+        raise StepError("infrastructure state initialization failed: "
+                        f"{init.err or init.out or '(no output)'}")
+    outputs = await tofu.outputs(dir, credentials)
+    if "params" in outputs:
+        return outputs["params"]
+    if not outputs:
+        return None
+    return legacy_params(opts, outputs)
+
+
+async def load_infrastructure_step(opts: dict) -> dict:
+    """Adopt the cluster out of remote state without planning or mutating
+    cloud resources: ONCE's `adopt_state` over the read `start_step` handed
+    on under `postgres-agy/state`, or a fresh read when nothing was. An
+    unreadable backend and a partial cluster fail closed; the adopted
+    `params` must then pass `params_errors`. A readable state without a
+    cluster means there is nothing to clean up on a delete."""
+    event = str(opts.get("blue/event"))
+    if "postgres-agy/state" in opts:
+        state = opts["postgres-agy/state"]
+    else:
+        state = await cluster.read_state(opts, state_output)
+    handed = {k: v for k, v in opts.items() if k != "postgres-agy/state"}
+    adopted = cluster.adopt_state(validate.spec, handed, event, state)
+    present = "once/cluster" in adopted
+    if failed(adopted):
+        return adopted
+    checked = _checked(adopted)
+    if failed(checked):
+        return checked
+    return {**checked, "postgres-agy/infrastructure-present?": present}
 
 
 # ---------------------------------------------------------------------------
 # Stage 2 — DNS
+#
+# One A record per node, all carrying `cluster-host`. libpq resolves the name
+# and tries every address it gets back, so a node that is down is skipped by
+# the client itself: the endpoint survives a failover without any DNS write,
+# and nothing has to hold a cloud API credential at the moment the cluster is
+# degraded. See plans/0001 for the alternative that was rejected.
+
 
 def dns_data(opts: dict) -> dict:
     return {**opts, "nodes": nodes(opts)}
@@ -182,64 +331,99 @@ async def dns_step(opts: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Shared render data
 
+
 def data_fn(opts: dict) -> dict:
+    """Template data: the topology, and the adopted cluster's `vpc_ip_range`
+    winning over the fallback on a real run."""
     ns = nodes(opts)
-    etcd_version = opts.get("etcd-version")
-    return {**opts,
-            "nodes": ns,
-            "first-node": ns[0],
-            "vpc-cidr": opts.get("vpc_ip_range") or fallback_outputs["vpc_ip_range"],
-            "ssh-private-key": str(opts.get("digitalocean-ssh-private-key") or ""),
-            "backup-r2-s3-endpoint": utils.endpoint_host(opts.get("backup-r2-endpoint")),
-            "backup-repo-path": utils.repo_path(opts.get("backup-r2-prefix")),
-            "etcd-tarball": f"etcd-{etcd_version}-linux-amd64.tar.gz",
-            "etcd-url": ("https://github.com/etcd-io/etcd/releases/download/"
-                         f"{etcd_version}/etcd-{etcd_version}-linux-amd64.tar.gz"),
-            "postgres-data-dir": f"/var/lib/postgresql/{opts.get('postgres-version')}/main",
-            "postgres-bin-dir": f"/usr/lib/postgresql/{opts.get('postgres-version')}/bin",
-            "admin-password-lookup": utils.par_lookup("postgres-admin-password"),
-            "replication-password-lookup": utils.par_lookup("postgres-replication-password"),
-            "backup-key-lookup": utils.par_lookup("backup-r2-access-key-id"),
-            "backup-secret-lookup": utils.par_lookup("backup-r2-secret-access-key")}
+    recorded = opts.get("once/cluster") or {}
+    facts = {**fallback_outputs, **{k: recorded[k] for k in fallback_outputs if k in recorded}}
+    etcd_version = str(opts.get("etcd-version") or "")
+    return {
+        **opts,
+        "nodes": ns,
+        "first-node": ns[0],
+        "vpc-cidr": facts["vpc_ip_range"],
+        "ssh-private-key": str(opts.get("digitalocean-ssh-private-key") or ""),
+        "backup-r2-s3-endpoint": utils.endpoint_host(opts.get("backup-r2-endpoint")),
+        "backup-repo-path": utils.repo_path(opts.get("backup-r2-prefix")),
+        "etcd-tarball": f"etcd-{etcd_version}-linux-amd64.tar.gz",
+        "etcd-url": "https://github.com/etcd-io/etcd/releases/download/"
+                    f"{etcd_version}/etcd-{etcd_version}-linux-amd64.tar.gz",
+        "postgres-data-dir": f"/var/lib/postgresql/{opts.get('postgres-version')}/main",
+        "postgres-bin-dir": f"/usr/lib/postgresql/{opts.get('postgres-version')}/bin",
+        "admin-password-lookup": utils.par_lookup("postgres-admin-password"),
+        "replication-password-lookup": utils.par_lookup("postgres-replication-password"),
+        "backup-key-lookup": utils.par_lookup("backup-r2-access-key-id"),
+        "backup-secret-lookup": utils.par_lookup("backup-r2-secret-access-key"),
+    }
 
 
 # ---------------------------------------------------------------------------
 # Stage 3 — local SSH configuration
 
+
 def ansible_local_specs(opts: dict) -> list[dict]:
     dir = tool_dir(opts, ansible_local_tool)
     data = data_fn(opts)
-    return [spec(template("ansible-local", "ansible.cfg"), f"{dir}/ansible.cfg", data),
-            spec(template("ansible-local", "inventory.ini"), f"{dir}/inventory.ini", data),
-            spec(template("ansible-local", "main.yml"), f"{dir}/main.yml", data)]
+    return [
+        spec(template("ansible-local", "ansible.cfg"), f"{dir}/ansible.cfg", data),
+        spec(template("ansible-local", "inventory.ini"), f"{dir}/inventory.ini", data),
+        spec(template("ansible-local", "main.yml"), f"{dir}/main.yml", data),
+    ]
+
+
+def ssh_config_hosts(opts: dict) -> list[dict]:
+    """The `~/.ssh/config` entries, as data the play loops over: the bare
+    profile pointing at node 0 (the spec's entry), then one alias per node.
+    ONCE's (Compute Cluster Standard §6)."""
+    return cluster.ssh_config_hosts(validate.spec, opts, _cluster_nodes(opts))
+
+
+def legacy_aliases(opts: dict) -> list[str]:
+    """The per-node aliases this package wrote before it adopted the SSH
+    Config Standard's one block — `<profile>-<ordinal>`, 1-based, each under
+    its own package-prefixed marker. The play removes those blocks
+    (ssh-config.md §8: a marker change is a migration) for one pin cycle;
+    then this goes."""
+    return [f"{opts.get('profile')}-{n}" for n in utils.ordinals()]
+
+
+def ansible_local_extra_vars(opts: dict) -> dict:
+    """What the play cannot know from a `build`: the aliases and addresses,
+    which are run-time facts and stay out of the rendered playbook so the
+    committed goldens carry no address (ssh-config.md §6), and `block_state`
+    — `present` on create, `absent` on delete — because the same playbook
+    file serves both events."""
+    key = opts.get("digitalocean-ssh-private-key")
+    return {
+        "host_alias": str(opts.get("profile")),
+        "ssh_hosts": ssh_config_hosts(opts),
+        "legacy_aliases": legacy_aliases(opts),
+        "ssh_private_key": "" if key is None else str(key),
+        "block_state": "absent" if opts.get("blue/event") == "delete" else "present",
+    }
 
 
 async def ansible_local_step(opts: dict) -> dict:
-    data = data_fn(opts)
-    delete = opts.get("blue/event") == "delete"
     return await ansible_with_spec(
-        opts,
-        ansible_local_specs(opts),
+        opts, ansible_local_specs(opts),
         dir=tool_dir(opts, ansible_local_tool),
         inventory="inventory.ini",
         playbooks={"create": "main.yml", "delete": "main.yml"},
-        extra_vars={
-            "block_state": "absent" if delete else "present",
-            "nodes": [{"alias": node["alias"], "public-ip": node["public-ip"],
-                       "ordinal": node["ordinal"]}
-                      for node in data["nodes"]],
-            "ssh_private_key": data["ssh-private-key"],
-        })
+        extra_vars=ansible_local_extra_vars(opts))
 
 
 # ---------------------------------------------------------------------------
 # Stage 4 — the cluster itself
 
+
 def _java_double(x: float) -> str:
-    """Java's Double.toString, which is what Green's cheshire JSON emits for
-    floats: decimal between 1e-3 and 1e7, `d.dddE±e` scientific outside it.
-    Python's own repr disagrees exactly where scientific notation starts
-    (0.0001 -> "1.0E-4"), and the goldens carry the Java form."""
+    """Java's Double.toString, which is what Cheshire renders floats through
+    and therefore what green's committed inventory bytes would carry.
+    Integral numbers print as longs. Python's own repr disagrees exactly
+    where scientific notation starts (0.0001 -> "1.0E-4"), and the goldens
+    carry the Java form."""
     if math.isnan(x):
         return "NaN"
     if math.isinf(x):
@@ -284,20 +468,27 @@ def _pretty(value, indent=0):
 
 
 def inventory(opts: dict) -> str:
+    """A JSON inventory rather than INI: the per-host facts the templates
+    need are structured, and `private_ip` in particular is what every
+    generated etcd, Patroni and HAProxy stanza is built from."""
     data = data_fn(opts)
-    # Green builds the hosts as a sorted-map; plain byte-order comparison is
-    # Clojure's `compare` for strings, so no locale-dependent collation here.
-    hosts = {str(node["name"]): {"ansible_host": node["public-ip"],
-                                 "ansible_user": "root",
-                                 "private_ip": node["private-ip"],
-                                 "node_ordinal": node["ordinal"]}
-             for node in sorted(data["nodes"], key=lambda node: str(node["name"]))}
+    hosts = {node["name"]: {
+        "ansible_host": node["public-ip"],
+        "ansible_user": "root",
+        "private_ip": node["private-ip"],
+        "node_ordinal": node["ordinal"],
+    } for node in sorted(data["nodes"], key=lambda node: node["name"])}
     return _pretty(
         {"all": {"children": {"postgres": {
             "hosts": hosts,
-            "vars": {"ansible_ssh_private_key_file": data["ssh-private-key"]}}}}})
+            "vars": {"ansible_ssh_private_key_file": data["ssh-private-key"]},
+        }}}})
 
 
+# The scripts and units that carry the backup, PITR-continuity and
+# verified-restore schedule. All three pairs are installed on all three
+# nodes; each asks Patroni what it is before doing anything, so the schedule
+# follows the leader lock instead of a node name.
 scheduled_work_templates = [
     "postgres-agy-heartbeat", "postgres-agy-heartbeat.service",
     "postgres-agy-heartbeat.timer",
@@ -327,9 +518,13 @@ def cluster_specs(opts: dict) -> list[dict]:
         spec(template("ansible-remote", "pgbackrest.conf.j2"),
              f"{dir}/templates/pgbackrest.conf.j2", data),
         raw_spec(f"{dir}/inventory.json", inventory(opts)),
-        *[spec(template("ansible-remote", f"{unit}.j2"),
+        # The nine scheduled-work files are listed once, here, because the
+        # playbook loops over the same names when it installs them. Two lists
+        # that had to be kept in step by hand is how a unit ends up rendered
+        # but never enabled.
+        *(spec(template("ansible-remote", f"{unit}.j2"),
                f"{dir}/templates/{unit}.j2", data)
-          for unit in scheduled_work_templates],
+          for unit in scheduled_work_templates),
     ]
 
 
@@ -338,8 +533,7 @@ async def cluster_step(opts: dict) -> dict:
             and opts.get("postgres-agy/infrastructure-present?") is False):
         return scaffold(opts, cluster_specs(opts))
     return await ansible_with_spec(
-        opts,
-        cluster_specs(opts),
+        opts, cluster_specs(opts),
         dir=tool_dir(opts, cluster_tool),
         inventory="inventory.json",
         playbooks={"create": "main.yml", "delete": "cleanup.yml"},
@@ -349,6 +543,7 @@ async def cluster_step(opts: dict) -> dict:
 
 # ---------------------------------------------------------------------------
 # Stage 5 — acceptance
+
 
 def acceptance_specs(opts: dict) -> list[dict]:
     dir = tool_dir(opts, acceptance_tool)
@@ -364,7 +559,13 @@ def process_result(opts: dict, label: str, result) -> dict:
 
 
 def acceptance_env(opts: dict) -> dict[str, str]:
-    return {"PGPASSWORD": str(opts.get("postgres-admin-password") or "")}
+    """The credential the acceptance script authenticates with, taken from
+    opts rather than read again from the ambient environment so a
+    `COLORS_PAR_*` overlay and a desired-state value cannot disagree. The
+    extra environment is added to the inherited one, so nothing else has to
+    be repeated here."""
+    password = opts.get("postgres-admin-password")
+    return {"PGPASSWORD": "" if password is None else str(password)}
 
 
 async def acceptance_step(opts: dict) -> dict:
@@ -374,6 +575,9 @@ async def acceptance_step(opts: dict) -> dict:
     result = await runtime.exec(
         ["bash", f"{tool_dir(opts, acceptance_tool)}/acceptance.sh"],
         env=acceptance_env(opts), timeout_ms=20 * 60 * 1000)
+    # The script's own transcript is the evidence a health check produced.
+    # Printing it on success as well as failure is the difference between
+    # "acceptance passed" and knowing which eight things it asserted.
     if result.out:
         print(result.out)
     return process_result(rendered, "acceptance", result)

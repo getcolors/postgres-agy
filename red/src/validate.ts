@@ -1,41 +1,74 @@
-// Credential-free desired-state validation, and the provider registry it uses
-// — the port of io.github.getcolors.postgres-agy.validate.
+// Credential-free desired-state validation, and the provider registry it
+// uses — the port of io.github.getcolors.postgres-agy.validate.
 //
-// The registry is package-owned rather than inherited: this package provisions
-// three droplets, its own firewall and its own DNS record set. Keeping the
-// table here means one place describes what a provider choice requires, what
-// it needs as a credential, and which of those credentials OpenTofu reads
-// natively from the environment.
-//
-// Every check accumulates. A run reports all of a file's problems at once with
-// exit 2, because fixing desired state one error per invocation is how a
-// person gives up on a config file.
+// The compute registry is package-owned — this package provisions three
+// droplets, its own firewall and its own DNS record set, so the keys a stage
+// interpolates are not ONCE's single-server keys — and the operations over it
+// are ONCE's `computeCluster` module, the one implementation of the Compute
+// Cluster Standard: selection, the required keys, the source lists, the
+// provider rules, the network mode and the topology are checked there over
+// `spec`, never copied here. What stays here is what only this package knows:
+// the fixed node count, the discovered VPC, the scoped ingress, and every
+// PostgreSQL, Patroni, etcd, HAProxy and pgBackRest rule.
 //
 // Green renders its keys as Clojure keywords, so every message here carries
 // the same leading colon — the three colours must report identical errors for
 // one colors.yml.
+//
+// Every check accumulates. A run reports all of a file's problems at once with
+// exit 2, because fixing desired state one error per invocation is how a
+// person gives up on a config file.
 
 import { parName } from "red/cli";
+import type { Registry } from "red/providers";
 import type { Opts } from "red/workflow";
+import { compute, computeCluster } from "package-once-red";
 import * as utils from "./utils.ts";
 
-export interface ProviderEntry {
-  required: string[];
-  secrets: string[];
-  tofuEnv: Record<string, string>;
-}
-
-export const providers: Record<string, Record<string, ProviderEntry>> = {
-  "provider-compute": {
-    digitalocean: {
-      required: ["digitalocean-name", "digitalocean-region", "digitalocean-size",
-                 "digitalocean-image", "digitalocean-ssh-keys",
-                 "digitalocean-ssh-private-key", "digitalocean-ssh-sources",
-                 "digitalocean-client-sources", "digitalocean-vpc-mode"],
-      secrets: ["do-token"],
-      tofuEnv: { "do-token": "DIGITALOCEAN_TOKEN" },
-    },
+// provider-compute -> what that choice implies.
+//
+// `required` are non-secret keys the template interpolates. `secrets` arrive
+// only through `COLORS_PAR_*`. `tofuEnv` is the subset OpenTofu reads
+// natively from the process environment, so a credential never has to be
+// rendered into a .tf file sitting in the work directory in plaintext.
+// `network` is discovered: the region's default VPC, never one this package
+// owns. `digitalocean-ssh-keys` stays a required literal key; the SSH Keypair
+// Standard is a separate adoption.
+export const computeProviders: computeCluster.ClusterRegistry = {
+  digitalocean: {
+    required: ["digitalocean-name", "digitalocean-region", "digitalocean-size",
+               "digitalocean-image", "digitalocean-ssh-keys",
+               "digitalocean-ssh-private-key", "digitalocean-ssh-sources",
+               "digitalocean-client-sources", "digitalocean-vpc-mode"],
+    secrets: ["do-token"],
+    tofuEnv: { "do-token": "DIGITALOCEAN_TOKEN" },
+    network: { mode: "discovered" },
   },
+};
+
+// The provider a deployment created before this package recorded one in its
+// compute output must be running: the only one it ever offered.
+export const defaultComputeProvider = "digitalocean";
+
+// How this package describes itself to ONCE's `computeCluster`. One
+// homogeneous role of `cluster-nodes` members, whose fallback addresses start
+// at offset 11 so that `build` renders the same 192.0.2.11-13 and
+// 10.114.0.11-13 it always did. The fallback subnet stands in for the
+// discovered VPC's range on a build; on a real run the range is the compute
+// state's `vpc_ip_range`.
+export const spec: computeCluster.ClusterSpec = {
+  registry: computeProviders,
+  default: defaultComputeProvider,
+  sources: { nonEmpty: ["ssh-sources", "client-sources"], mayBeEmpty: [] },
+  roles: [{ role: null, countKey: "cluster-nodes", count: 3, fallbackOffset: 11 }],
+  fallbackSubnet: "10.114.0.0/20",
+};
+
+// Provider slot -> provider name -> what that choice implies. The compute slot
+// is the registry above, so the OpenTofu environment and the secrets are read
+// from one place whichever slot a stage asks for.
+export const providers: Registry = {
+  "provider-compute": computeProviders,
 
   "provider-dns": {
     cloudflare: {
@@ -54,6 +87,9 @@ export const providers: Record<string, Record<string, ProviderEntry>> = {
       tofuEnv: { "s3-access-key-id": "AWS_ACCESS_KEY_ID",
                  "s3-secret-access-key": "AWS_SECRET_ACCESS_KEY" },
     },
+    // R2 is S3-compatible and therefore authenticates through the AWS chain.
+    // These are the *state* credentials; the backup repository has its own
+    // pair so a leaked backup key cannot rewrite infrastructure state.
     r2: {
       required: ["r2-bucket", "r2-endpoint"],
       secrets: ["r2-access-key-id", "r2-secret-access-key"],
@@ -64,14 +100,18 @@ export const providers: Record<string, Record<string, ProviderEntry>> = {
 };
 
 export const slots = ["provider-compute", "provider-dns", "provider-backend"];
+
+// The slots this package selects and checks itself; the compute slot is ONCE's.
+export const ownSlots = ["provider-dns", "provider-backend"];
+
 export const profilePar = parName("profile");
 
 export const ownRequired = [
   "profile", "workdir", "cluster-name", "cluster-host", "cluster-nodes",
   "postgres-version", "postgres-port", "postgres-database",
   "postgres-admin-user", "postgres-replication-user",
-  "patroni-package-version", "patroni-rest-port", "patroni-ttl", "patroni-loop-wait",
-  "patroni-retry-timeout", "patroni-synchronous-node-count",
+  "patroni-package-version", "patroni-rest-port", "patroni-ttl",
+  "patroni-loop-wait", "patroni-retry-timeout", "patroni-synchronous-node-count",
   "etcd-version", "etcd-sha256", "etcd-client-port", "etcd-peer-port",
   "haproxy-version", "haproxy-primary-port", "haproxy-replica-port",
   "haproxy-stats-port",
@@ -87,9 +127,14 @@ export const ownSecrets = [
   "backup-r2-access-key-id", "backup-r2-secret-access-key",
 ];
 
+// A VPC is discovered, never described. Accepting any of these would let one
+// deployment place its nodes on another's network while still passing every
+// other check, so their mere presence is an error rather than a warning.
+// `digitalocean-vpc-uuid` and `digitalocean-vpc-cidr` are refused by ONCE's
+// discovered-network rule with its own message; these are the spellings only
+// this package refuses.
 export const forbiddenVpcKeys = [
-  "digitalocean-vpc-id", "digitalocean-vpc-uuid", "digitalocean-vpc-cidr",
-  "digitalocean-vpc-name", "digitalocean-vpc",
+  "digitalocean-vpc-id", "digitalocean-vpc-name", "digitalocean-vpc",
 ];
 
 export function placeholder(x: unknown): boolean {
@@ -97,16 +142,18 @@ export function placeholder(x: unknown): boolean {
     (typeof x === "string" && (!x.trim() || x.toUpperCase() === "REPLACE_ME"));
 }
 
-export function entry(opts: Opts, slot: string): ProviderEntry | undefined {
-  return providers[slot]?.[String(opts[slot])];
+interface Entry { required?: string[]; secrets?: string[]; tofuEnv?: Record<string, string> }
+
+export function entry(opts: Opts, slot: string): Entry | undefined {
+  return (providers as Record<string, Record<string, Entry>>)[slot]?.[String(opts[slot])];
 }
 
 export function tofuEnv(opts: Opts, slot: string): Record<string, string> {
   return entry(opts, slot)?.tofuEnv ?? {};
 }
 
-function slotKeys(opts: Opts, field: "required" | "secrets"): string[] {
-  return slots.flatMap((slot) => entry(opts, slot)?.[field] ?? []);
+function slotKeys(opts: Opts, selected: string[], field: "required" | "secrets"): string[] {
+  return selected.flatMap((slot) => entry(opts, slot)?.[field] ?? []);
 }
 
 function missing(opts: Opts, keys: string[]): string[] {
@@ -121,25 +168,22 @@ export function envErrors(env: Record<string, string | undefined>): string[] {
     : [];
 }
 
-const dnsRe = /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
-const cidrRe = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}\/(?:[0-9]|[12][0-9]|3[0-2])$/;
+const dnsRe =
+  /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
 const profileRe = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
 const identifierRe = /^[a-z_][a-z0-9_]{0,62}$/;
 const stanzaRe = /^[a-z][a-z0-9-]{0,31}$/;
 const etcdVersionRe = /^v[0-9]+\.[0-9]+\.[0-9]+$/;
+// A Debian version, not a release version: PGDG revisions its own packaging
+// (`4.1.5-1.pgdg24.04+1`), and a pin that named only the upstream release
+// would still let two converges install different bytes.
 const debVersionRe = /^[0-9]+\.[0-9]+\.[0-9]+-[A-Za-z0-9.+~:-]+$/;
 const sha256Re = /^[0-9a-f]{64}$/;
 const oncalendarRe = /^[A-Za-z0-9 *,./:-]+$/;
 const httpsRe = /^https:\/\/[A-Za-z0-9.-]+(?::[0-9]+)?\/?$/;
 const prefixRe = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
-export function validCidr(value: unknown): boolean {
-  const s = String(value);
-  if (!cidrRe.test(s)) return false;
-  return s.split("/")[0]!.split(".").every((octet) => Number(octet) <= 255);
-}
-
-export function positiveInt(x: unknown): boolean {
+function positiveInt(x: unknown): boolean {
   return typeof x === "number" && Number.isInteger(x) && x > 0;
 }
 
@@ -151,6 +195,15 @@ function prStr(value: unknown): string {
   return String(value);
 }
 
+// Listeners that must each own a distinct port on every node.
+//
+// `postgres-port` is deliberately absent. PostgreSQL binds only the node's
+// private VPC address, while HAProxy binds only the public address and
+// loopback, so the primary listener is expected to reuse 5432 — a client
+// reaching `<cluster-host>:5432` and a replica streaming from
+// `<private-ip>:5432` never contend. Every other listener here shares an
+// address with at least one of the others, so a repeated number is a node
+// that half-starts.
 const exclusivePortKeys = [
   "patroni-rest-port", "etcd-client-port", "etcd-peer-port",
   "haproxy-primary-port", "haproxy-replica-port", "haproxy-stats-port",
@@ -158,16 +211,16 @@ const exclusivePortKeys = [
 ];
 
 function distinctPortErrors(opts: Opts): string[] {
-  const ports = exclusivePortKeys.flatMap((key) => {
+  const ports: Array<[string, number]> = [];
+  for (const key of exclusivePortKeys) {
     const value = opts[key];
-    return typeof value === "number" && Number.isInteger(value)
-      ? [[key, value] as const] : [];
-  });
-  const groups = new Map<number, string[]>();
-  for (const [key, value] of ports) {
-    groups.set(value, [...(groups.get(value) ?? []), key]);
+    if (typeof value === "number" && Number.isInteger(value)) ports.push([key, value]);
   }
-  const dupes = [...groups.entries()]
+  const grouped = new Map<number, string[]>();
+  for (const [key, value] of ports) {
+    grouped.set(value, [...(grouped.get(value) ?? []), key]);
+  }
+  const dupes = [...grouped.entries()]
     .filter(([, keys]) => keys.length > 1)
     .sort(([a], [b]) => a - b);
   const pg = opts["postgres-port"];
@@ -179,140 +232,107 @@ function distinctPortErrors(opts: Opts): string[] {
     ...dupes.map(([port, keys]) =>
       `port ${port} is claimed by ${keys.join(" and ")}; ` +
       "every listener on a node needs its own port"),
-    ...[...shadowed].sort().map((key) => `:${key} must differ from :postgres-port`),
+    ...shadowed.sort().map((key) => `:${key} must differ from :postgres-port`),
   ];
 }
 
+// Everything wrong with `opts` that does not depend on a credential. Empty
+// means the desired state renders. The missing keys are this package's, the
+// selected compute provider's (ONCE's `requiredKeys`) and the other slots';
+// the package's own rules follow; the Compute Cluster Standard's — selection,
+// the source lists, the provider and network rules, the topology — are ONCE's
+// over `spec`; and the ingress scope this package alone insists on comes last.
 export function stateErrors(opts: Opts): string[] {
   const errors: string[] = [];
+  const push = (condition: unknown, message: string) => {
+    if (condition) errors.push(message);
+  };
 
-  for (const key of missing(opts, [...ownRequired, ...slotKeys(opts, "required")])) {
+  for (const key of missing(opts, [...ownRequired,
+                                   ...compute.requiredKeys(spec, opts),
+                                   ...slotKeys(opts, ownSlots, "required")])) {
     errors.push(`:${key} is required`);
   }
 
-  for (const slot of slots) {
-    if (!Object.hasOwn(providers[slot]!, String(opts[slot]))) {
-      errors.push(`unsupported :${slot} ${prStr(opts[slot])}`);
-    }
+  for (const slot of ownSlots) {
+    if (!entry(opts, slot)) errors.push(`unsupported :${slot} ${prStr(opts[slot])}`);
   }
 
-  if (opts["provider-compute"] !== "digitalocean") {
-    errors.push(":provider-compute must be digitalocean");
-  }
-  if (opts["provider-dns"] !== "cloudflare") {
-    errors.push(":provider-dns must be cloudflare");
-  }
-  if (typeof opts["compute-prevent-destroy"] !== "boolean") {
-    errors.push(":compute-prevent-destroy must be true or false");
-  }
-  if (typeof opts["cloudflare-proxied"] !== "boolean") {
-    errors.push(":cloudflare-proxied must be true or false");
-  }
-  if (opts["cloudflare-proxied"] === true) {
-    errors.push(":cloudflare-proxied must be false; Cloudflare's proxy does not carry the PostgreSQL wire protocol");
-  }
+  push(opts["provider-dns"] !== "cloudflare", ":provider-dns must be cloudflare");
+  push(typeof opts["compute-prevent-destroy"] !== "boolean",
+       ":compute-prevent-destroy must be true or false");
+  push(typeof opts["cloudflare-proxied"] !== "boolean",
+       ":cloudflare-proxied must be true or false");
+  push(opts["cloudflare-proxied"] === true,
+       ":cloudflare-proxied must be false; Cloudflare's proxy does not carry the PostgreSQL wire protocol");
 
-  if (!(placeholder(opts.profile) || profileRe.test(String(opts.profile)))) {
-    errors.push(":profile must be a safe 1-63 character name");
-  }
+  push(!(placeholder(opts.profile) || profileRe.test(String(opts.profile))),
+       ":profile must be a safe 1-63 character name");
 
-  if (opts["cluster-nodes"] !== utils.nodeCount) {
-    errors.push(`:cluster-nodes must be ${utils.nodeCount}; the topology colocates a ` +
-      "quorum store on the database nodes and cannot elect with fewer");
-  }
+  push(opts["cluster-nodes"] !== utils.nodeCount,
+       `:cluster-nodes must be ${utils.nodeCount}; the topology colocates a ` +
+       "quorum store on the database nodes and cannot elect with fewer");
 
-  if (String(opts["digitalocean-vpc-mode"]) !== "default") {
-    errors.push(":digitalocean-vpc-mode must be default; the regional default VPC is discovered at runtime");
-  }
+  push(String(opts["digitalocean-vpc-mode"]) !== "default",
+       ":digitalocean-vpc-mode must be default; the regional default VPC is discovered at runtime");
   for (const key of forbiddenVpcKeys) {
-    if (Object.hasOwn(opts, key)) {
-      errors.push(`:${key} must not be configured; the regional default VPC is discovered at runtime`);
-    }
+    push(key in opts,
+         `:${key} must not be configured; the regional default VPC is discovered at runtime`);
   }
 
   for (const key of ["cluster-host", "cloudflare-zone"]) {
     const value = opts[key];
-    if (!placeholder(value) && !dnsRe.test(String(value))) {
-      errors.push(`:${key} must be a DNS name`);
-    }
+    push(!placeholder(value) && !dnsRe.test(String(value)),
+         `:${key} must be a DNS name`);
   }
-  {
-    const host = opts["cluster-host"];
-    const zone = opts["cloudflare-zone"];
-    if (!placeholder(host) && !placeholder(zone) &&
-        !(String(host) === String(zone) || String(host).endsWith(`.${zone}`))) {
-      errors.push(":cluster-host must be inside :cloudflare-zone");
-    }
-  }
+  const host = String(opts["cluster-host"]);
+  const zone = String(opts["cloudflare-zone"]);
+  push(!placeholder(opts["cluster-host"]) && !placeholder(opts["cloudflare-zone"]) &&
+       !(host === zone || host.endsWith(`.${zone}`)),
+       ":cluster-host must be inside :cloudflare-zone");
 
-  for (const key of ["digitalocean-ssh-sources", "digitalocean-client-sources"]) {
-    const values = opts[key];
-    if (!Array.isArray(values) || values.length === 0 ||
-        values.some((value) => !validCidr(value))) {
-      errors.push(`:${key} must be a non-empty list of IPv4 CIDRs`);
-    }
-  }
-  for (const key of ["digitalocean-ssh-sources", "digitalocean-client-sources"]) {
-    const values = opts[key];
-    if (Array.isArray(values) && values.some((value) => String(value) === "0.0.0.0/0")) {
-      errors.push(`:${key} must not contain 0.0.0.0/0; administrative and database ingress stay scoped`);
-    }
-  }
-
-  if (!positiveInt(opts["postgres-version"])) {
-    errors.push(":postgres-version must be a PostgreSQL major version integer such as 17");
-  }
-  if (typeof opts["postgres-version"] === "number" &&
-      Number.isInteger(opts["postgres-version"]) && opts["postgres-version"] < 15) {
-    errors.push(":postgres-version must be 15 or later; the topology relies on quorum synchronous commit and pg_rewind");
-  }
+  const pgVersion = opts["postgres-version"];
+  push(!positiveInt(pgVersion),
+       ":postgres-version must be a PostgreSQL major version integer such as 17");
+  push(typeof pgVersion === "number" && Number.isInteger(pgVersion) && pgVersion < 15,
+       ":postgres-version must be 15 or later; the topology relies on quorum synchronous commit and pg_rewind");
 
   for (const key of ["patroni-package-version", "pgbackrest-package-version"]) {
     const value = opts[key];
-    if (!placeholder(value) && !debVersionRe.test(String(value))) {
-      errors.push(`:${key} must be a full Debian package version such as 4.1.5-1.pgdg24.04+1`);
-    }
+    push(!placeholder(value) && !debVersionRe.test(String(value)),
+         `:${key} must be a full Debian package version such as 4.1.5-1.pgdg24.04+1`);
   }
-  if (!(placeholder(opts["etcd-version"]) ||
-        etcdVersionRe.test(String(opts["etcd-version"])))) {
-    errors.push(":etcd-version must be an exact vX.Y.Z release tag");
-  }
-  if (!(placeholder(opts["etcd-sha256"]) ||
-        sha256Re.test(String(opts["etcd-sha256"])))) {
-    errors.push(":etcd-sha256 must be the lowercase hex SHA-256 of the linux-amd64 release tarball");
-  }
-  if (!(placeholder(opts["haproxy-version"]) ||
-        /^[0-9]+\.[0-9]+$/.test(String(opts["haproxy-version"])))) {
-    errors.push(":haproxy-version must be a distribution major.minor series such as 2.8");
-  }
+  push(!(placeholder(opts["etcd-version"]) ||
+         etcdVersionRe.test(String(opts["etcd-version"]))),
+       ":etcd-version must be an exact vX.Y.Z release tag");
+  push(!(placeholder(opts["etcd-sha256"]) ||
+         sha256Re.test(String(opts["etcd-sha256"]))),
+       ":etcd-sha256 must be the lowercase hex SHA-256 of the linux-amd64 release tarball");
+  push(!(placeholder(opts["haproxy-version"]) ||
+         /^[0-9]+\.[0-9]+$/.test(String(opts["haproxy-version"]))),
+       ":haproxy-version must be a distribution major.minor series such as 2.8");
 
   for (const key of ["postgres-database", "postgres-admin-user", "postgres-replication-user"]) {
     const value = opts[key];
-    if (!placeholder(value) && !identifierRe.test(String(value))) {
-      errors.push(`:${key} must be an unquoted lowercase SQL identifier`);
-    }
+    push(!placeholder(value) && !identifierRe.test(String(value)),
+         `:${key} must be an unquoted lowercase SQL identifier`);
   }
-  if (!placeholder(opts["postgres-admin-user"]) &&
-      String(opts["postgres-admin-user"]) === String(opts["postgres-replication-user"])) {
-    errors.push(":postgres-replication-user must differ from :postgres-admin-user");
-  }
+  push(!placeholder(opts["postgres-admin-user"]) &&
+       String(opts["postgres-admin-user"]) === String(opts["postgres-replication-user"]),
+       ":postgres-replication-user must differ from :postgres-admin-user");
 
-  if (!(placeholder(opts["backup-stanza"]) ||
-        stanzaRe.test(String(opts["backup-stanza"])))) {
-    errors.push(":backup-stanza must be a short lowercase pgBackRest stanza name");
-  }
-  if (!(placeholder(opts["backup-r2-endpoint"]) ||
-        httpsRe.test(String(opts["backup-r2-endpoint"])))) {
-    errors.push(":backup-r2-endpoint must be an https:// origin");
-  }
-  if (!(placeholder(opts["backup-r2-prefix"]) ||
-        prefixRe.test(String(opts["backup-r2-prefix"])))) {
-    errors.push(":backup-r2-prefix must be a relative object-key prefix");
-  }
-  if (!placeholder(opts["backup-r2-bucket"]) && !placeholder(opts["r2-bucket"]) &&
-      String(opts["backup-r2-bucket"]) === String(opts["r2-bucket"])) {
-    errors.push(":backup-r2-bucket must not be the OpenTofu state bucket; backups and state do not share a blast radius");
-  }
+  push(!(placeholder(opts["backup-stanza"]) ||
+         stanzaRe.test(String(opts["backup-stanza"]))),
+       ":backup-stanza must be a short lowercase pgBackRest stanza name");
+  push(!(placeholder(opts["backup-r2-endpoint"]) ||
+         httpsRe.test(String(opts["backup-r2-endpoint"]))),
+       ":backup-r2-endpoint must be an https:// origin");
+  push(!(placeholder(opts["backup-r2-prefix"]) ||
+         prefixRe.test(String(opts["backup-r2-prefix"]))),
+       ":backup-r2-prefix must be a relative object-key prefix");
+  push(!placeholder(opts["backup-r2-bucket"]) && !placeholder(opts["r2-bucket"]) &&
+       String(opts["backup-r2-bucket"]) === String(opts["r2-bucket"]),
+       ":backup-r2-bucket must not be the OpenTofu state bucket; backups and state do not share a blast radius");
 
   for (const key of ["cluster-nodes", "postgres-port", "patroni-ttl",
                      "patroni-loop-wait", "patroni-retry-timeout",
@@ -320,59 +340,59 @@ export function stateErrors(opts: Opts): string[] {
                      "restore-check-max-age-hours", "restore-check-max-lag-seconds",
                      "heartbeat-retention-days", "cloudflare-record-ttl",
                      ...exclusivePortKeys]) {
-    if (!positiveInt(opts[key])) errors.push(`:${key} must be a positive integer`);
+    push(!positiveInt(opts[key]), `:${key} must be a positive integer`);
   }
   errors.push(...distinctPortErrors(opts));
+  // Cloudflare accepts 1 (automatic) or 60..86400. A short explicit TTL is
+  // what lets a replaced node leave the endpoint's address set quickly.
+  const ttl = opts["cloudflare-record-ttl"];
+  const ttlNumber = typeof ttl === "number" ? ttl : 0;
+  push(!(ttlNumber === 1 || (60 <= ttlNumber && ttlNumber <= 86400)),
+       ":cloudflare-record-ttl must be 1 (automatic) or between 60 and 86400");
 
-  {
-    const ttl = typeof opts["cloudflare-record-ttl"] === "number"
-      ? opts["cloudflare-record-ttl"] : 0;
-    if (!(ttl === 1 || (60 <= ttl && ttl <= 86400))) {
-      errors.push(":cloudflare-record-ttl must be 1 (automatic) or between 60 and 86400");
-    }
-  }
-
-  {
-    const count = typeof opts["patroni-synchronous-node-count"] === "number"
-      ? opts["patroni-synchronous-node-count"] : 0;
-    if (!(0 < count && count < utils.nodeCount)) {
-      errors.push(`:patroni-synchronous-node-count must be between 1 and ${utils.nodeCount - 1}; ` +
-        "requiring every standby to acknowledge stalls writes when one node is lost");
-    }
-  }
-  {
-    const loopWait = opts["patroni-loop-wait"];
-    const ttl = opts["patroni-ttl"];
-    if (!(typeof loopWait === "number" && Number.isInteger(loopWait) &&
-          typeof ttl === "number" && Number.isInteger(ttl) &&
-          2 * loopWait < ttl)) {
-      errors.push(":patroni-ttl must exceed twice :patroni-loop-wait, or the leader lock can expire between health checks");
-    }
-  }
+  const syncCount = opts["patroni-synchronous-node-count"];
+  const syncNumber = typeof syncCount === "number" ? syncCount : 0;
+  push(!(0 < syncNumber && syncNumber < utils.nodeCount),
+       `:patroni-synchronous-node-count must be between 1 and ${utils.nodeCount - 1}; ` +
+       "requiring every standby to acknowledge stalls writes when one node is lost");
+  const loopWait = opts["patroni-loop-wait"];
+  const patroniTtl = opts["patroni-ttl"];
+  push(!(typeof loopWait === "number" && Number.isInteger(loopWait) &&
+         typeof patroniTtl === "number" && Number.isInteger(patroniTtl) &&
+         2 * loopWait < patroniTtl),
+       ":patroni-ttl must exceed twice :patroni-loop-wait, or the leader lock can expire between health checks");
 
   for (const key of ["backup-oncalendar", "restore-check-oncalendar", "heartbeat-oncalendar"]) {
     const value = opts[key];
-    if (!placeholder(value) && !oncalendarRe.test(String(value))) {
-      errors.push(`:${key} must be a systemd OnCalendar expression`);
-    }
+    push(!placeholder(value) && !oncalendarRe.test(String(value)),
+         `:${key} must be a systemd OnCalendar expression`);
   }
 
-  {
-    const lag = typeof opts["restore-check-max-lag-seconds"] === "number"
-      ? opts["restore-check-max-lag-seconds"] : 0;
-    if (!(120 < lag)) {
-      errors.push(":restore-check-max-lag-seconds must exceed 120; below that it " +
-        "fails on a healthy cluster, because a segment is only archived " +
-        "once archive_timeout elapses");
-    }
+  // The verified restore asserts that a heartbeat written after the last
+  // backup survived the round trip through the archive. Its tolerance has to
+  // leave room for `archive_timeout` plus the restore itself, or the check
+  // fails on a healthy cluster and stops meaning anything.
+  const maxLag = opts["restore-check-max-lag-seconds"];
+  const maxLagNumber = typeof maxLag === "number" ? maxLag : 0;
+  push(!(120 < maxLagNumber),
+       ":restore-check-max-lag-seconds must exceed 120; below that it " +
+       "fails on a healthy cluster, because a segment is only archived " +
+       "once archive_timeout elapses");
+
+  errors.push(...computeCluster.stateErrors(spec, opts));
+
+  // ONCE checks that each source list is non-empty and every entry a CIDR;
+  // the world is a CIDR, and refusing it is this package's own rule: the
+  // PostgreSQL port is a genuinely public port.
+  for (const key of ["digitalocean-ssh-sources", "digitalocean-client-sources"]) {
+    push(compute.cidrs(opts, key).some((value) => value === "0.0.0.0/0"),
+         `:${key} must not contain 0.0.0.0/0; administrative and database ingress stay scoped`);
   }
 
   return errors;
 }
 
 export function secretErrors(opts: Opts, selected: string[] = slots): string[] {
-  const keys = [...ownSecrets,
-                ...selected.flatMap((slot) => entry(opts, slot)?.secrets ?? [])];
-  return [...new Set(missing(opts, keys))]
+  return [...new Set(missing(opts, [...ownSecrets, ...slotKeys(opts, selected, "secrets")]))]
     .map((key) => `required credential is not set: ${parName(key)}`);
 }

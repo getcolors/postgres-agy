@@ -2,9 +2,10 @@
 // io.github.getcolors.postgres-agy.utils.
 //
 // Everything here is a pure function of desired state. The topology is derived
-// rather than configured: three nodes with stable ordinals, stable Ansible
-// aliases, and stable droplet names, so an OpenTofu address and an inventory
-// host name never move because a list was reordered.
+// rather than configured: three nodes with stable ordinals and stable droplet
+// names, so an OpenTofu address and an inventory host name never move because
+// a list was reordered. The `~/.ssh/config` aliases are the Compute Cluster
+// Standard's, derived by ONCE and wrapped in `tools.sshAlias`.
 
 import type { Opts } from "red/workflow";
 
@@ -23,7 +24,8 @@ export function ordinals(): number[] {
 }
 
 export function baseName(opts: Opts): string {
-  return String(opts["digitalocean-name"] ?? "") || "postgres-agy";
+  const name = String(opts["digitalocean-name"] ?? "");
+  return name.length ? name : "postgres-agy";
 }
 
 // The droplet name for ordinal `n`, also the Ansible inventory host name and
@@ -31,15 +33,6 @@ export function baseName(opts: Opts): string {
 // `tofu state list` and the inventory mutually greppable.
 export function nodeName(opts: Opts, n: number): string {
   return `${baseName(opts)}-${n}`;
-}
-
-export function profileAlias(opts: Opts): string {
-  return String(opts.profile ?? "") || "postgres-agy";
-}
-
-// The `~/.ssh/config` Host entry the operator commands use for ordinal `n`.
-export function sshAlias(opts: Opts, n: number): string {
-  return `${profileAlias(opts)}-${n}`;
 }
 
 // The Ansible expression that reads a credential at play time.
@@ -60,5 +53,5 @@ export function endpointHost(endpoint: unknown): string {
 // pgBackRest's repository path is absolute inside the bucket.
 export function repoPath(prefix: unknown): string {
   const p = String(prefix ?? "").replace(/^\/+/, "");
-  return p.trim() === "" ? "/" : `/${p}`;
+  return p.trim().length === 0 ? "/" : `/${p}`;
 }

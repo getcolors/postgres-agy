@@ -42,7 +42,8 @@ async def test_run_dispatches_the_quoted_remote_command_through_ssh():
     assert result["blue/exit"] == 0
     assert len(seen) == 1
     assert seen[0][0] == "ssh"
-    assert "postgres-agy-fixture-1" in seen[0]
+    # the default `--node 1` is the first node: ONCE's alias for index 0
+    assert "postgres-agy-fixture-0" in seen[0]
     assert seen[0][-1] == "'patronictl' '-c' '/etc/patroni/patroni.yml' 'list'"
 
 

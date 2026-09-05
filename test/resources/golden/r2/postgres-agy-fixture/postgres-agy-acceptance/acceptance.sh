@@ -11,7 +11,7 @@ STANZA="main"
 NODES=3
 MAX_AGE_HOURS=26
 SSH_CONFIG="$HOME/.ssh/config"
-ALIASES=("postgres-agy-fixture-1" "postgres-agy-fixture-2" "postgres-agy-fixture-3" )
+ALIASES=("postgres-agy-fixture-0" "postgres-agy-fixture-1" "postgres-agy-fixture-2" )
 
 failures=0
 checks=0

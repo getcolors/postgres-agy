@@ -15,10 +15,6 @@
     (is (= "postgres-agy-1" (utils/node-name {:digitalocean-name "postgres-agy"} 1)))
     (is (= "my-pg-2" (utils/node-name {:digitalocean-name "my-pg"} 2))))
 
-  (testing "ssh alias"
-    (is (= "postgres-agy-1" (utils/ssh-alias {:profile "postgres-agy"} 1)))
-    (is (= "my-pg-2" (utils/ssh-alias {:profile "my-pg"} 2))))
-
   (testing "par lookup formatting"
     (is (= "{{ lookup('env','COLORS_PAR_POSTGRES_ADMIN_PASSWORD') }}"
            (utils/par-lookup :postgres-admin-password)))

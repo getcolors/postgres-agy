@@ -60,11 +60,31 @@ election and failover. The provider registry is package-owned in each colour's
 
 ## Coupling
 
-The package pins the Green SDK in `green/deps.edn`, the Red SDK in
-`red/package.json`, and the Blue SDK in `blue/pyproject.toml`. There is no ONCE
-dependency in any colour. Use `POSTGRES_AGY_LIB_ROOT` (the repository root, for
-every colour; red also accepts the `red/` dir directly) and `GREEN_LIB_ROOT`
-for working-tree development. Final launchers use a pushed SHA managed by
+The package pins the SDK — Green in `green/deps.edn`, the Red SDK in
+`red/package.json`, the Blue SDK in `blue/pyproject.toml` — and ONCE, in the
+same three manifests, for one namespace: `compute-cluster`
+(`io.github.getcolors.once.compute-cluster`, `package-once-red`'s
+`computeCluster`, `package_once_blue.compute_cluster`), the one implementation
+of the Compute Cluster Standard (`workspace/standards/compute-cluster.md`).
+The package owns its provider registry, its OpenTofu templates and its stage
+names; its `compute-providers` registry and `spec` (one homogeneous role of
+`cluster-nodes` nodes, fallback offset 11, the `10.114.0.0/20` fallback
+subnet, a discovered network), its own validators — the fixed node count, the
+`default` VPC mode, the `0.0.0.0/0` refusal on both source lists — and its
+`params-errors`; ONCE owns selection, the source lists, the network and
+topology checks, the fallback nodes, the aliases, `read-state`,
+`adopt-state`, `resolved-cluster` and the provider-switch guard. The compute
+state is the template's `params` output — `provider`, `vpc_id`,
+`vpc_ip_range`, and one node per droplet — adopted under `:once/cluster`; a
+pre-adoption state, which recorded only the parallel
+`node_public_ips`/`node_private_ips` lists, is translated into the same shape
+by the reader in `tools`, and refused when the lists disagree. The
+`~/.ssh/config` block is the SSH Config Standard's: one block marked with the
+profile, `Host <profile>` for node 1 and `<profile>-<index>` per node; the
+play removes the pre-standard per-node blocks for one pin cycle. Use
+`POSTGRES_AGY_LIB_ROOT` (the repository root, for every colour; red also
+accepts the `red/` dir directly), `GREEN_LIB_ROOT` and `ONCE_LIB_ROOT` for
+working-tree development. Final launchers use a pushed SHA managed by
 `bb pin` (in `green/`), which stamps all three payloads from their unpinned
 birth forms; deployment launchers are copies, not symlinks.
 
@@ -73,7 +93,10 @@ birth forms; deployment launchers are copies, not symlinks.
 - Credentials use `COLORS_PAR_*` and never render into files on disk.
 - `COLORS_PAR_PROFILE` is refused.
 - All cluster communication (streaming replication, Patroni REST API, etcd) is
-  scoped strictly to the private VPC network.
+  scoped strictly to the private VPC network. Every machine in the account's
+  regional default VPC is inside that east-west trust boundary, which the
+  Compute Cluster Standard names as a security exception of a discovered
+  network.
 - Public ingress is restricted to SSH (port 22) and HAProxy (port 5432/5433)
   from configured source CIDRs.
 - pgBackRest restore verification uses `--archive-mode=off` and isolated scratch

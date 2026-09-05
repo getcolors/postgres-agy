@@ -6,15 +6,21 @@
 // ones, keys its remote state at `<profile>/<stage>.tfstate`. Those two names
 // are the deployment's identity; changing either orphans live infrastructure,
 // so they are constants here and asserted by the golden suite.
+//
+// The cluster itself — which machines exist, at which addresses — is the
+// Compute Cluster Standard's `params`, adopted through ONCE's `computeCluster`
+// module and carried under `once/cluster`. This package puts its own facts
+// inside it: `vpc_id` and `vpc_ip_range` at the top level.
 
 import * as ansible from "red/ansible";
 import { stageDir } from "red/cli";
 import { toolEnv } from "red/providers";
+import { runtime } from "red/runtime";
 import { PRESERVE_JINJA_DELIMITERS, contentSpec, scaffold, type Spec, type Template } from "red/scaffold";
 import * as tofu from "red/tofu";
-import { runtime } from "red/runtime";
 import type { Opts } from "red/workflow";
 import { StepError, failed } from "red/workflow";
+import { compute, computeCluster } from "package-once-red";
 import * as utils from "./utils.ts";
 import * as validate from "./validate.ts";
 
@@ -24,22 +30,22 @@ import ansibleLocalInventory from "../resources/tools/ansible-local/inventory.in
 import ansibleLocalMain from "../resources/tools/ansible-local/main.yml" with { type: "text" };
 import ansibleRemoteCfg from "../resources/tools/ansible-remote/ansible.cfg" with { type: "text" };
 import ansibleRemoteCleanup from "../resources/tools/ansible-remote/cleanup.yml" with { type: "text" };
-import ansibleRemoteEtcdConf from "../resources/tools/ansible-remote/etcd.conf.yml.j2" with { type: "text" };
-import ansibleRemoteEtcdService from "../resources/tools/ansible-remote/etcd.service.j2" with { type: "text" };
-import ansibleRemoteHaproxyCfg from "../resources/tools/ansible-remote/haproxy.cfg.j2" with { type: "text" };
 import ansibleRemoteMain from "../resources/tools/ansible-remote/main.yml" with { type: "text" };
-import ansibleRemotePatroniService from "../resources/tools/ansible-remote/patroni.service.j2" with { type: "text" };
-import ansibleRemotePatroniYml from "../resources/tools/ansible-remote/patroni.yml.j2" with { type: "text" };
-import ansibleRemotePgbackrestConf from "../resources/tools/ansible-remote/pgbackrest.conf.j2" with { type: "text" };
-import ansibleRemoteBackup from "../resources/tools/ansible-remote/postgres-agy-backup.j2" with { type: "text" };
-import ansibleRemoteBackupService from "../resources/tools/ansible-remote/postgres-agy-backup.service.j2" with { type: "text" };
-import ansibleRemoteBackupTimer from "../resources/tools/ansible-remote/postgres-agy-backup.timer.j2" with { type: "text" };
-import ansibleRemoteHeartbeat from "../resources/tools/ansible-remote/postgres-agy-heartbeat.j2" with { type: "text" };
-import ansibleRemoteHeartbeatService from "../resources/tools/ansible-remote/postgres-agy-heartbeat.service.j2" with { type: "text" };
-import ansibleRemoteHeartbeatTimer from "../resources/tools/ansible-remote/postgres-agy-heartbeat.timer.j2" with { type: "text" };
-import ansibleRemoteRestoreCheck from "../resources/tools/ansible-remote/postgres-agy-restore-check.j2" with { type: "text" };
-import ansibleRemoteRestoreCheckService from "../resources/tools/ansible-remote/postgres-agy-restore-check.service.j2" with { type: "text" };
-import ansibleRemoteRestoreCheckTimer from "../resources/tools/ansible-remote/postgres-agy-restore-check.timer.j2" with { type: "text" };
+import etcdConf from "../resources/tools/ansible-remote/etcd.conf.yml.j2" with { type: "text" };
+import etcdService from "../resources/tools/ansible-remote/etcd.service.j2" with { type: "text" };
+import haproxyCfg from "../resources/tools/ansible-remote/haproxy.cfg.j2" with { type: "text" };
+import patroniService from "../resources/tools/ansible-remote/patroni.service.j2" with { type: "text" };
+import patroniYml from "../resources/tools/ansible-remote/patroni.yml.j2" with { type: "text" };
+import pgbackrestConf from "../resources/tools/ansible-remote/pgbackrest.conf.j2" with { type: "text" };
+import backupScript from "../resources/tools/ansible-remote/postgres-agy-backup.j2" with { type: "text" };
+import backupService from "../resources/tools/ansible-remote/postgres-agy-backup.service.j2" with { type: "text" };
+import backupTimer from "../resources/tools/ansible-remote/postgres-agy-backup.timer.j2" with { type: "text" };
+import heartbeatScript from "../resources/tools/ansible-remote/postgres-agy-heartbeat.j2" with { type: "text" };
+import heartbeatService from "../resources/tools/ansible-remote/postgres-agy-heartbeat.service.j2" with { type: "text" };
+import heartbeatTimer from "../resources/tools/ansible-remote/postgres-agy-heartbeat.timer.j2" with { type: "text" };
+import restoreCheckScript from "../resources/tools/ansible-remote/postgres-agy-restore-check.j2" with { type: "text" };
+import restoreCheckService from "../resources/tools/ansible-remote/postgres-agy-restore-check.service.j2" with { type: "text" };
+import restoreCheckTimer from "../resources/tools/ansible-remote/postgres-agy-restore-check.timer.j2" with { type: "text" };
 import dnsMainTf from "../resources/tools/dns/main.tf" with { type: "text" };
 import infrastructureMainTf from "../resources/tools/infrastructure/main.tf" with { type: "text" };
 
@@ -65,22 +71,22 @@ const templates: Record<string, string> = {
   "ansible-local/main.yml": ansibleLocalMain,
   "ansible-remote/ansible.cfg": ansibleRemoteCfg,
   "ansible-remote/cleanup.yml": ansibleRemoteCleanup,
-  "ansible-remote/etcd.conf.yml.j2": ansibleRemoteEtcdConf,
-  "ansible-remote/etcd.service.j2": ansibleRemoteEtcdService,
-  "ansible-remote/haproxy.cfg.j2": ansibleRemoteHaproxyCfg,
   "ansible-remote/main.yml": ansibleRemoteMain,
-  "ansible-remote/patroni.service.j2": ansibleRemotePatroniService,
-  "ansible-remote/patroni.yml.j2": ansibleRemotePatroniYml,
-  "ansible-remote/pgbackrest.conf.j2": ansibleRemotePgbackrestConf,
-  "ansible-remote/postgres-agy-backup.j2": ansibleRemoteBackup,
-  "ansible-remote/postgres-agy-backup.service.j2": ansibleRemoteBackupService,
-  "ansible-remote/postgres-agy-backup.timer.j2": ansibleRemoteBackupTimer,
-  "ansible-remote/postgres-agy-heartbeat.j2": ansibleRemoteHeartbeat,
-  "ansible-remote/postgres-agy-heartbeat.service.j2": ansibleRemoteHeartbeatService,
-  "ansible-remote/postgres-agy-heartbeat.timer.j2": ansibleRemoteHeartbeatTimer,
-  "ansible-remote/postgres-agy-restore-check.j2": ansibleRemoteRestoreCheck,
-  "ansible-remote/postgres-agy-restore-check.service.j2": ansibleRemoteRestoreCheckService,
-  "ansible-remote/postgres-agy-restore-check.timer.j2": ansibleRemoteRestoreCheckTimer,
+  "ansible-remote/etcd.conf.yml.j2": etcdConf,
+  "ansible-remote/etcd.service.j2": etcdService,
+  "ansible-remote/haproxy.cfg.j2": haproxyCfg,
+  "ansible-remote/patroni.service.j2": patroniService,
+  "ansible-remote/patroni.yml.j2": patroniYml,
+  "ansible-remote/pgbackrest.conf.j2": pgbackrestConf,
+  "ansible-remote/postgres-agy-backup.j2": backupScript,
+  "ansible-remote/postgres-agy-backup.service.j2": backupService,
+  "ansible-remote/postgres-agy-backup.timer.j2": backupTimer,
+  "ansible-remote/postgres-agy-heartbeat.j2": heartbeatScript,
+  "ansible-remote/postgres-agy-heartbeat.service.j2": heartbeatService,
+  "ansible-remote/postgres-agy-heartbeat.timer.j2": heartbeatTimer,
+  "ansible-remote/postgres-agy-restore-check.j2": restoreCheckScript,
+  "ansible-remote/postgres-agy-restore-check.service.j2": restoreCheckService,
+  "ansible-remote/postgres-agy-restore-check.timer.j2": restoreCheckTimer,
   "dns/main.tf": dnsMainTf,
   "infrastructure/main.tf": infrastructureMainTf,
 };
@@ -92,53 +98,89 @@ export function template(path: string, file: string): Template {
   return { name, content };
 }
 
-export function spec(source: Template, target: string, data: Opts): Spec {
+function spec(source: Template, target: string, data: Opts): Spec {
   return { template: source, target, data, opts: templateOpts };
 }
 
-export const rawSpec = (target: string, content: string): Spec => contentSpec(target, content);
+const rawSpec = (target: string, content: string): Spec => contentSpec(target, content);
 
 export function credentialEnv(opts: Opts, ...slots: string[]): Record<string, string> | undefined {
-  return toolEnv(validate.providers as never, opts, [...slots, "provider-backend"]);
+  return toolEnv(validate.providers, opts, [...slots, "provider-backend"]);
 }
 
-export const backendCredentialEnv = (opts: Opts) => credentialEnv(opts);
+export function backendCredentialEnv(opts: Opts): Record<string, string> | undefined {
+  return credentialEnv(opts);
+}
 
-export function cidrs(opts: Opts, key: string): string[] {
-  const value = opts[key];
-  const xs = Array.isArray(value) ? value : String(value).split(/[,\s]+/);
-  return xs.map((x) => String(x).trim()).filter((x) => x.length > 0);
+// The state backend of one OpenTofu stage, written before the stage runs.
+// `dir` and `key` are explicit so the state addresses cannot move.
+export function backendAdvice(tool: string) {
+  return tofu.conventionalBackendAdvice({
+    dir: (opts) => toolDir(opts, tool),
+    key: (opts) => `${opts.profile}/${tool}.tfstate`,
+  });
+}
+
+function refuse(opts: Opts, errors: string[]): Opts {
+  return { ...opts, "red/exit": 1, "red/err": errors.join("\n") };
 }
 
 // ---------------------------------------------------------------------------
 // Placeholder topology
+//
+// `build` renders the whole tree without contacting a provider, so it needs
+// values that are obviously not real. The nodes are ONCE's fallbacks — RFC
+// 5737 TEST-NET-1 public addresses and RFC 1918 private ones cut from `spec`'s
+// subnet at offset 11 — and the network facts beside them are the stand-ins
+// below. A golden file that leaked into a real run fails loudly rather than
+// pointing at somebody's host, and the goldens stay a pure function of
+// colors.yml.
 
 export const fallbackOutputs: Opts = {
   vpc_id: "00000000-0000-0000-0000-000000000000",
   vpc_ip_range: "10.114.0.0/20",
-  node_public_ips: ["192.0.2.11", "192.0.2.12", "192.0.2.13"],
-  node_private_ips: ["10.114.0.11", "10.114.0.12", "10.114.0.13"],
 };
 
-function outputMap(result: Opts): Opts | undefined {
-  return result["postgres-agy/outputs"] as Opts | undefined;
+export interface Node {
+  ordinal: number;
+  name: string;
+  alias: string;
+  "public-ip": string;
+  "private-ip": string;
 }
 
-// The rendered topology: one map per ordinal, joined with whatever addresses
-// the infrastructure stage produced (or the placeholders, before it has run).
-export function nodes(opts: Opts): Opts[] {
-  const fallbackPublic = fallbackOutputs.node_public_ips as string[];
-  const fallbackPrivate = fallbackOutputs.node_private_ips as string[];
-  const publicIps = [...((opts.node_public_ips as unknown[] | undefined) ?? fallbackPublic)];
-  const privateIps = [...((opts.node_private_ips as unknown[] | undefined) ?? fallbackPrivate)];
-  return utils.ordinals().map((n) => {
-    const i = n - 1;
+// ONCE's nodes for this deployment: the adopted `params.nodes` on a real run,
+// the fallbacks on a build — renamed to what this package has always called
+// its nodes, `<name>-<ordinal>`, so the rendered inventory is byte-identical
+// to what it was.
+function clusterNodes(opts: Opts): computeCluster.Node[] {
+  const params = opts["once/cluster"] as computeCluster.ClusterParams | undefined;
+  const members = computeCluster.nodes(validate.spec, opts, params);
+  if (params !== undefined && params !== null) return members;
+  return members.map((node) => ({ ...node, name: utils.nodeName(opts, node.index + 1) }));
+}
+
+// The `~/.ssh/config` Host entry the operator commands use for ordinal `n`:
+// ONCE's `<profile>-<index>`, the Compute Cluster Standard's alias for the
+// node at 0-based `index`. ONCE's list opens with the bare profile, so the
+// 1-based ordinal is also the position of its node's alias.
+export function sshAlias(opts: Opts, n: number): string {
+  return computeCluster.aliases(validate.spec, opts)[n]!;
+}
+
+// The rendered topology: one map per ordinal over the node ONCE reports — the
+// adopted cluster on a real run, the placeholders before the infrastructure
+// stage has run. Pure: given the same opts it is the same array, which is what
+// makes the inventory and the goldens deterministic.
+export function nodes(opts: Opts): Node[] {
+  return clusterNodes(opts).map((node) => {
+    const ordinal = node.index + 1;
     return {
-      ordinal: n,
-      name: utils.nodeName(opts, n),
-      alias: utils.sshAlias(opts, n),
-      "public-ip": publicIps[i] ?? fallbackPublic[i],
-      "private-ip": privateIps[i] ?? fallbackPrivate[i],
+      ordinal,
+      name: String(node.name),
+      alias: sshAlias(opts, ordinal),
+      "public-ip": String(node.ip),
+      "private-ip": String(node.vpc_ip),
     };
   });
 }
@@ -150,9 +192,9 @@ export function infrastructureData(opts: Opts): Opts {
   return {
     ...opts,
     "node-names-hcl": tofu.hclList(utils.ordinals().map((n) => utils.nodeName(opts, n))),
-    "ssh-keys-hcl": tofu.hclList(cidrs(opts, "digitalocean-ssh-keys")),
-    "ssh-sources-hcl": tofu.hclList(cidrs(opts, "digitalocean-ssh-sources")),
-    "client-sources-hcl": tofu.hclList(cidrs(opts, "digitalocean-client-sources")),
+    "ssh-keys-hcl": tofu.hclList(compute.cidrs(opts, "digitalocean-ssh-keys")),
+    "ssh-sources-hcl": tofu.hclList(compute.cidrs(opts, "digitalocean-ssh-sources")),
+    "client-sources-hcl": tofu.hclList(compute.cidrs(opts, "digitalocean-client-sources")),
   };
 }
 
@@ -162,50 +204,153 @@ export function infrastructureSpecs(opts: Opts): Spec[] {
                infrastructureData(opts))];
 }
 
+// The compute stage's `params` output, as ONCE reads it; undefined when the
+// apply reported none.
+export function outputParams(result: Opts): computeCluster.ClusterParams | undefined {
+  return computeCluster.outputParams({ "tofu/outputs": result["postgres-agy/outputs"] });
+}
+
+const nonBlank = (v: unknown): boolean => typeof v === "string" && v.trim() !== "";
+
+// The extension keys this package puts inside `params`, which ONCE preserves
+// but does not read: a non-blank `vpc_id` and a canonical `vpc_ip_range`, the
+// network every etcd, Patroni and firewall rule is scoped to. A real run is
+// refused without them; the legacy translation is held to the same rule.
+export function paramsErrors(params: computeCluster.ClusterParams): string[] {
+  const errors: string[] = [];
+  if (!nonBlank(params.vpc_id)) errors.push("compute state carries no vpc_id");
+  if (!nonBlank(params.vpc_ip_range)) {
+    errors.push("compute state carries no vpc_ip_range");
+  } else if (!computeCluster.ipv4Network(params.vpc_ip_range)) {
+    errors.push(`compute state vpc_ip_range ${JSON.stringify(params.vpc_ip_range)}`
+      + " is not a canonical IPv4 network such as 10.40.0.0/24");
+  }
+  return errors;
+}
+
+// `opts` once the adopted cluster passes `paramsErrors`, or the refusal.
+function checked(opts: Opts): Opts {
+  const errors = "once/cluster" in opts
+    ? paramsErrors(opts["once/cluster"] as computeCluster.ClusterParams) : [];
+  return errors.length > 0 ? refuse(opts, errors) : opts;
+}
+
+// What the infrastructure stage hands on after its apply: `result` as it is on
+// a failure, a delete or a build, and otherwise ONCE's `resolvedCluster` over
+// the apply's `params` output — undefined outputs and a partial cluster are
+// refused there — checked against `paramsErrors`. Pure, so the wiring is
+// testable without an apply.
+export function resolveInfrastructure(opts: Opts, result: Opts): Opts {
+  if (failed(result)) return result;
+  if (opts["red/event"] === "delete" || opts["red/event"] === "build") return result;
+  const resolved = computeCluster.resolvedCluster(validate.spec, opts, result, {}, outputParams(result));
+  return failed(resolved) ? resolved : checked(resolved);
+}
+
 export async function infrastructureStep(opts: Opts): Promise<Opts> {
   const result = await tofu.tofuWithSpec(opts, infrastructureSpecs(opts), {
     dir: toolDir(opts, infrastructureTool),
     env: credentialEnv(opts, "provider-compute"),
     outputKey: "postgres-agy/outputs",
   });
-  if (failed(result)) return result;
-  if (opts["red/event"] === "delete") return result;
-  if (opts["red/event"] === "build") return { ...result, ...fallbackOutputs };
-  return { ...result, ...fallbackOutputs, ...(outputMap(result) ?? {}) };
+  return resolveInfrastructure(opts, result);
 }
 
-// Read node addresses out of remote state without planning or mutating cloud
-// resources.
-export async function loadInfrastructureStep(opts: Opts): Promise<Opts> {
-  const dir = toolDir(opts, infrastructureTool);
-  const rendered = {
-    ...scaffold({ ...opts, "red/event": "build" }, infrastructureSpecs(opts)),
-    "red/event": opts["red/event"],
+// A state written before this package recorded `params`: the parallel
+// `node_public_ips` and `node_private_ips` lists, zipped into the nodes the
+// standard describes, with `vpc_id` and `vpc_ip_range` copied and the names
+// this package has always given its nodes. Refused, as the SDK's `StepError`,
+// when the two lists disagree with each other or with `cluster-nodes` —
+// guessing which droplet is which is how a delete destroys around a node — and
+// when no `vpc_id` or `vpc_ip_range` was recorded. The range's form is
+// `paramsErrors`' to check, the same way for a legacy and a recorded state.
+export function legacyParams(opts: Opts, outputs: Record<string, unknown>): computeCluster.ClusterParams {
+  const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+  const publics = list(outputs.node_public_ips);
+  const privates = list(outputs.node_private_ips);
+  const n = opts["cluster-nodes"];
+  if (!(n === publics.length && n === privates.length)) {
+    throw new StepError(`legacy state lists ${publics.length} public addresses and `
+      + `${privates.length} private addresses; refusing to guess the cluster`);
+  }
+  for (const k of ["vpc_id", "vpc_ip_range"]) {
+    if (!nonBlank(outputs[k])) throw new StepError(`legacy state carries no ${k}`);
+  }
+  return {
+    provider: validate.defaultComputeProvider,
+    vpc_id: outputs.vpc_id,
+    vpc_ip_range: outputs.vpc_ip_range,
+    nodes: Array.from({ length: n as number }, (_, i) => ({
+      index: i,
+      role: null,
+      name: utils.nodeName(opts, i + 1),
+      ip: publics[i] as string,
+      vpc_ip: privates[i] as string,
+      user: "root",
+      sudoer: "root",
+    })),
   };
+}
+
+// The reader ONCE's `readState` takes: the compute `params` recorded in the
+// infrastructure state, undefined when the state is readable and holds
+// nothing, and the legacy translation when it holds only the pre-adoption
+// outputs. Delete needs the cluster before it destroys anything — the local
+// SSH configuration is keyed by it — and a `plan` at that moment would be a
+// second chance to change infrastructure on the way to removing it; nor can a
+// fresh clone re-derive it, so the stage is rendered, its backend written and
+// initialized here, before the read. A failed initialization throws the SDK's
+// `StepError`, the shape `red/tofu` throws on an unreadable backend;
+// `readState` reports both fail-closed. Injectable into `startStep` and
+// `loadInfrastructureStep`, so tests never shell out to tofu.
+export async function stateOutput(opts: Opts): Promise<computeCluster.ClusterParams | undefined> {
+  const dir = toolDir(opts, infrastructureTool);
   const credentials = credentialEnv(opts, "provider-compute");
+  scaffold({ ...opts, "red/event": "build" }, infrastructureSpecs(opts));
+  await backendAdvice(infrastructureTool)(opts);
   const init = await runtime.exec(
     ["tofu", `-chdir=${dir}`, "init", "-input=false", "-no-color"],
     { env: credentials });
   if (init.exit !== 0) {
-    return processResult(rendered, "infrastructure state initialization", init);
+    throw new StepError(`infrastructure state initialization failed: ${init.err || init.out || "(no output)"}`);
   }
-  try {
-    const outputs = await tofu.outputs(dir, credentials);
-    return {
-      ...rendered, ...fallbackOutputs, ...outputs,
-      "postgres-agy/infrastructure-present?": Object.hasOwn(outputs, "node_public_ips"),
-    };
-  } catch (t) {
-    return {
-      ...rendered, "red/exit": 1,
-      "red/err": `infrastructure state output failed: ${
-        t instanceof Error ? t.message || t.constructor.name : String(t)}`,
-    };
-  }
+  const outputs = await tofu.outputs(dir, credentials);
+  if ("params" in outputs) return outputs.params as computeCluster.ClusterParams;
+  if (Object.keys(outputs).length === 0) return undefined;
+  return legacyParams(opts, outputs);
+}
+
+// Adopt the cluster out of remote state without planning or mutating cloud
+// resources: ONCE's `adoptState` over the read `startStep` handed on under
+// `postgres-agy/state`, or a fresh read when nothing was. An unreadable backend
+// and a partial cluster fail closed; the adopted `params` must then pass
+// `paramsErrors`. A readable state without a cluster means there is nothing to
+// clean up on a delete.
+export async function loadInfrastructureStep(
+  opts: Opts,
+  reader: compute.StateReader = stateOutput,
+): Promise<Opts> {
+  const event = String(opts["red/event"]);
+  const { "postgres-agy/state": handed, ...rest } = opts;
+  const state = "postgres-agy/state" in opts
+    ? handed as compute.StateRead
+    : await computeCluster.readState(opts, reader);
+  const adopted = computeCluster.adoptState(validate.spec, rest, event, state);
+  const present = "once/cluster" in adopted;
+  if (failed(adopted)) return adopted;
+  const result = checked(adopted);
+  if (failed(result)) return result;
+  return { ...result, "postgres-agy/infrastructure-present?": present };
 }
 
 // ---------------------------------------------------------------------------
 // Stage 2 — DNS
+//
+// One A record per node, all carrying `cluster-host`. libpq resolves the name
+// and tries every address it gets back, so a node that is down is skipped by
+// the client itself: the endpoint survives a failover without any DNS write,
+// and nothing has to hold a cloud API credential at the moment the cluster is
+// degraded. See plans/0001 for the alternative that was rejected.
 
 export function dnsData(opts: Opts): Opts {
   return { ...opts, nodes: nodes(opts) };
@@ -227,20 +372,25 @@ export async function dnsStep(opts: Opts): Promise<Opts> {
 // ---------------------------------------------------------------------------
 // Shared render data
 
+// Template data: the topology, and the adopted cluster's `vpc_ip_range`
+// winning over the fallback on a real run.
 export function dataFn(opts: Opts): Opts {
   const ns = nodes(opts);
+  const recorded = (opts["once/cluster"] ?? {}) as Opts;
+  const facts = { ...fallbackOutputs,
+    ...Object.fromEntries(Object.keys(fallbackOutputs).filter((k) => k in recorded).map((k) => [k, recorded[k]])) };
   const etcdVersion = String(opts["etcd-version"] ?? "");
   return {
     ...opts,
     nodes: ns,
     "first-node": ns[0],
-    "vpc-cidr": opts.vpc_ip_range ?? fallbackOutputs.vpc_ip_range,
+    "vpc-cidr": facts.vpc_ip_range,
     "ssh-private-key": String(opts["digitalocean-ssh-private-key"] ?? ""),
     "backup-r2-s3-endpoint": utils.endpointHost(opts["backup-r2-endpoint"]),
     "backup-repo-path": utils.repoPath(opts["backup-r2-prefix"]),
     "etcd-tarball": `etcd-${etcdVersion}-linux-amd64.tar.gz`,
-    "etcd-url": `https://github.com/etcd-io/etcd/releases/download/${etcdVersion}` +
-      `/etcd-${etcdVersion}-linux-amd64.tar.gz`,
+    "etcd-url": "https://github.com/etcd-io/etcd/releases/download/" +
+      `${etcdVersion}/etcd-${etcdVersion}-linux-amd64.tar.gz`,
     "postgres-data-dir": `/var/lib/postgresql/${opts["postgres-version"]}/main`,
     "postgres-bin-dir": `/usr/lib/postgresql/${opts["postgres-version"]}/bin`,
     "admin-password-lookup": utils.parLookup("postgres-admin-password"),
@@ -263,20 +413,42 @@ export function ansibleLocalSpecs(opts: Opts): Spec[] {
   ];
 }
 
+// The `~/.ssh/config` entries, as data the play loops over: the bare profile
+// pointing at node 0 (the spec's entry), then one alias per node. ONCE's
+// (Compute Cluster Standard §6).
+export function sshConfigHosts(opts: Opts): computeCluster.SshConfigHost[] {
+  return computeCluster.sshConfigHosts(validate.spec, opts, clusterNodes(opts));
+}
+
+// The per-node aliases this package wrote before it adopted the SSH Config
+// Standard's one block — `<profile>-<ordinal>`, 1-based, each under its own
+// package-prefixed marker. The play removes those blocks (ssh-config.md §8: a
+// marker change is a migration) for one pin cycle; then this goes.
+export function legacyAliases(opts: Opts): string[] {
+  return utils.ordinals().map((n) => `${opts.profile}-${n}`);
+}
+
+// What the play cannot know from a `build`: the aliases and addresses, which
+// are run-time facts and stay out of the rendered playbook so the committed
+// goldens carry no address (ssh-config.md §6), and `block_state` — `present`
+// on create, `absent` on delete — because the same playbook file serves both
+// events.
+export function ansibleLocalExtraVars(opts: Opts): Record<string, unknown> {
+  return {
+    host_alias: String(opts.profile),
+    ssh_hosts: sshConfigHosts(opts),
+    legacy_aliases: legacyAliases(opts),
+    ssh_private_key: String(opts["digitalocean-ssh-private-key"] ?? ""),
+    block_state: opts["red/event"] === "delete" ? "absent" : "present",
+  };
+}
+
 export async function ansibleLocalStep(opts: Opts): Promise<Opts> {
-  const data = dataFn(opts);
-  const isDelete = opts["red/event"] === "delete";
   return ansible.ansibleWithSpec(opts, {
     dir: toolDir(opts, ansibleLocalTool),
     inventory: "inventory.ini",
     playbooks: { create: "main.yml", delete: "main.yml" },
-    extraVars: {
-      block_state: isDelete ? "absent" : "present",
-      nodes: (data.nodes as Opts[]).map((node) => ({
-        alias: node.alias, "public-ip": node["public-ip"], ordinal: node.ordinal,
-      })),
-      ssh_private_key: data["ssh-private-key"],
-    },
+    extraVars: ansibleLocalExtraVars(opts),
   }, ansibleLocalSpecs(opts));
 }
 
@@ -328,14 +500,15 @@ function pretty(value: unknown, indent = 0): string {
   return JSON.stringify(value ?? null);
 }
 
+// A JSON inventory rather than INI: the per-host facts the templates need are
+// structured, and `private_ip` in particular is what every generated etcd,
+// Patroni and HAProxy stanza is built from.
 export function inventory(opts: Opts): string {
   const data = dataFn(opts);
   const hosts: Record<string, Opts> = {};
-  // Green builds the hosts as a sorted-map; plain byte-order comparison is
-  // Clojure's `compare` for strings, so no locale-dependent collation here.
-  for (const node of [...(data.nodes as Opts[])]
-      .sort((a, b) => (String(a.name) < String(b.name) ? -1 : String(a.name) > String(b.name) ? 1 : 0))) {
-    hosts[String(node.name)] = {
+  for (const node of [...(data.nodes as Node[])]
+         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+    hosts[node.name] = {
       ansible_host: node["public-ip"],
       ansible_user: "root",
       private_ip: node["private-ip"],
@@ -354,6 +527,10 @@ export function inventory(opts: Opts): string {
   });
 }
 
+// The scripts and units that carry the backup, PITR-continuity and
+// verified-restore schedule. All three pairs are installed on all three nodes;
+// each asks Patroni what it is before doing anything, so the schedule follows
+// the leader lock instead of a node name.
 export const scheduledWorkTemplates = [
   "postgres-agy-heartbeat", "postgres-agy-heartbeat.service",
   "postgres-agy-heartbeat.timer",
@@ -382,6 +559,10 @@ export function clusterSpecs(opts: Opts): Spec[] {
     spec(template("ansible-remote", "pgbackrest.conf.j2"),
          `${dir}/templates/pgbackrest.conf.j2`, data),
     rawSpec(`${dir}/inventory.json`, inventory(opts)),
+    // The nine scheduled-work files are listed once, here, because the
+    // playbook loops over the same names when it installs them. Two lists
+    // that had to be kept in step by hand is how a unit ends up rendered but
+    // never enabled.
     ...scheduledWorkTemplates.map((unit) =>
       spec(template("ansible-remote", `${unit}.j2`),
            `${dir}/templates/${unit}.j2`, data)),
@@ -413,16 +594,20 @@ export function acceptanceSpecs(opts: Opts): Spec[] {
 
 export function processResult(
   opts: Opts, label: string,
-  { exit, out, err }: { exit: number; out: string; err: string },
+  result: { exit: number; out: string; err: string },
 ): Opts {
-  if (exit === 0) return { ...opts, "red/exit": 0 };
+  if (result.exit === 0) return { ...opts, "red/exit": 0 };
   return {
     ...opts,
-    "red/exit": Math.max(1, exit),
-    "red/err": `${label} failed: ${err || out || "(no output)"}`,
+    "red/exit": Math.max(1, result.exit),
+    "red/err": `${label} failed: ${result.err || result.out || "(no output)"}`,
   };
 }
 
+// The credential the acceptance script authenticates with, taken from opts
+// rather than read again from the ambient environment so a `COLORS_PAR_*`
+// overlay and a desired-state value cannot disagree. The extra environment is
+// added to the inherited one, so nothing else has to be repeated here.
 export function acceptanceEnv(opts: Opts): Record<string, string> {
   return { PGPASSWORD: String(opts["postgres-admin-password"] ?? "") };
 }
@@ -433,7 +618,10 @@ export async function acceptanceStep(opts: Opts): Promise<Opts> {
   const result = await runtime.exec(
     ["bash", `${toolDir(opts, acceptanceTool)}/acceptance.sh`],
     { env: acceptanceEnv(opts), timeoutMs: 20 * 60 * 1000 });
-  if (result.out) console.log(result.out);
+  // The script's own transcript is the evidence a health check produced.
+  // Printing it on success as well as failure is the difference between
+  // "acceptance passed" and knowing which eight things it asserted.
+  if (result.out.length) console.log(result.out);
   return processResult(rendered, "acceptance", result);
 }
 

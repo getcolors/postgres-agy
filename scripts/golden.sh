@@ -40,6 +40,7 @@ grep -q 'data "digitalocean_vpc" "default"' "$infra"
 grep -q 'output "vpc_id"' "$infra"
 grep -q 'output "node_public_ips"' "$infra"
 grep -q 'output "node_private_ips"' "$infra"
+grep -q 'output "params"' "$infra"
 grep -q '129.159.242.163/32' "$infra"
 [ "$(grep -c 'prevent_destroy = true' "$infra")" -ge 2 ] || {
   echo 'golden: deployment-owned infrastructure lost prevent_destroy' >&2; exit 1

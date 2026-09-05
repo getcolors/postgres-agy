@@ -29,3 +29,9 @@ Read `colors.yml` before changing desired state or running a lifecycle command.
 ./blue psql
 ./blue delete
 ```
+
+The operator verbs dispatch over SSH through the `~/.ssh/config` aliases the
+local stage manages — one block marked with the profile, holding
+`Host <profile>` for node 1 and `Host <profile>-0`, `<profile>-1`,
+`<profile>-2` for each node. `--node N` picks which node to dispatch through
+(`--node 2` is `<profile>-1`); use a live one when the cluster is degraded.

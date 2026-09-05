@@ -18,7 +18,7 @@ from pathlib import Path
 from blue.cli import load_yaml, read_pars
 from blue.process import posix_quote, run_inherit
 
-from . import utils, validate
+from . import tools, utils, validate
 
 KINDS = ("status", "failover", "switchover", "backup", "verify-restore", "psql")
 
@@ -65,7 +65,7 @@ def ssh_command(opts: dict, ordinal: int, remote: list[str], tty: bool) -> list[
     """Dispatch through the `~/.ssh/config` alias the local stage manages."""
     return ["ssh", "-F", os.path.join(str(Path.home()), ".ssh/config"),
             *(["-t"] if tty else []),
-            "--", utils.ssh_alias(opts, ordinal),
+            "--", tools.ssh_alias(opts, ordinal),
             " ".join(posix_quote(part) for part in remote)]
 
 

@@ -1,28 +1,67 @@
 (ns io.github.getcolors.postgres-agy.validate
   "Credential-free desired-state validation, and the provider registry it uses.
 
-  The registry is package-owned rather than inherited: this package provisions
-  three droplets, its own firewall and its own DNS record set. Keeping the table
-  here means one place describes what a provider choice requires, what it
-  needs as a credential, and which of those credentials OpenTofu reads natively
-  from the environment.
+  The compute registry is package-owned — this package provisions three
+  droplets, its own firewall and its own DNS record set, so the keys a stage
+  interpolates are not ONCE's single-server keys — and the operations over it
+  are ONCE's `compute-cluster` namespace, the one implementation of the
+  Compute Cluster Standard: selection, the required keys, the source lists,
+  the provider rules, the network mode and the topology are checked there
+  over `spec`, never copied here. What stays here is what only this package
+  knows: the fixed node count, the discovered VPC, the scoped ingress, and
+  every PostgreSQL, Patroni, etcd, HAProxy and pgBackRest rule.
 
   Every check accumulates. A run reports all of a file's problems at once with
   exit 2, because fixing desired state one error per invocation is how a person
   gives up on a config file."
   (:require [clojure.string :as str]
             [green.cli :as green-cli]
+            [io.github.getcolors.once.compute :as compute]
+            [io.github.getcolors.once.compute-cluster :as cluster]
             [io.github.getcolors.postgres-agy.utils :as utils]))
 
+(def compute-providers
+  "provider-compute -> what that choice implies.
+
+  `:required` are non-secret keys the template interpolates. `:secrets` arrive
+  only through `COLORS_PAR_*`. `:tofu-env` is the subset OpenTofu reads
+  natively from the process environment, so a credential never has to be
+  rendered into a .tf file sitting in the work directory in plaintext.
+  `:network` is `:discovered`: the region's default VPC, never one this
+  package owns. `digitalocean-ssh-keys` stays a required literal key; the SSH
+  Keypair Standard is a separate adoption."
+  {"digitalocean"
+   {:required [:digitalocean-name :digitalocean-region :digitalocean-size
+               :digitalocean-image :digitalocean-ssh-keys
+               :digitalocean-ssh-private-key :digitalocean-ssh-sources
+               :digitalocean-client-sources :digitalocean-vpc-mode]
+    :secrets [:do-token]
+    :tofu-env {:do-token "DIGITALOCEAN_TOKEN"}
+    :network {:mode :discovered}}})
+
+(def default-compute-provider
+  "The provider a deployment created before this package recorded one in its
+  compute output must be running: the only one it ever offered."
+  "digitalocean")
+
+(def spec
+  "How this package describes itself to ONCE's `compute-cluster`. One
+  homogeneous role of `cluster-nodes` members, whose fallback addresses start
+  at offset 11 so that `build` renders the same 192.0.2.11-13 and
+  10.114.0.11-13 it always did. The fallback subnet stands in for the
+  discovered VPC's range on a build; on a real run the range is the compute
+  state's `vpc_ip_range`."
+  {:registry compute-providers
+   :default default-compute-provider
+   :sources {:non-empty ["ssh-sources" "client-sources"] :may-be-empty []}
+   :roles [{:role nil :count-key :cluster-nodes :count 3 :fallback-offset 11}]
+   :fallback-subnet "10.114.0.0/20"})
+
 (def providers
-  {:provider-compute
-   {"digitalocean"
-    {:required [:digitalocean-name :digitalocean-region :digitalocean-size
-                :digitalocean-image :digitalocean-ssh-keys
-                :digitalocean-ssh-private-key :digitalocean-ssh-sources
-                :digitalocean-client-sources :digitalocean-vpc-mode]
-     :secrets [:do-token]
-     :tofu-env {:do-token "DIGITALOCEAN_TOKEN"}}}
+  "Provider slot -> provider name -> what that choice implies. The compute
+  slot is the registry above, so the OpenTofu environment and the secrets are
+  read from one place whichever slot a stage asks for."
+  {:provider-compute compute-providers
 
    :provider-dns
    {"cloudflare"
@@ -37,12 +76,21 @@
           :secrets [:s3-access-key-id :s3-secret-access-key]
           :tofu-env {:s3-access-key-id "AWS_ACCESS_KEY_ID"
                      :s3-secret-access-key "AWS_SECRET_ACCESS_KEY"}}
+    ;; R2 is S3-compatible and therefore authenticates through the AWS chain.
+    ;; These are the *state* credentials; the backup repository has its own
+    ;; pair so a leaked backup key cannot rewrite infrastructure state.
     "r2" {:required [:r2-bucket :r2-endpoint]
           :secrets [:r2-access-key-id :r2-secret-access-key]
           :tofu-env {:r2-access-key-id "AWS_ACCESS_KEY_ID"
                      :r2-secret-access-key "AWS_SECRET_ACCESS_KEY"}}}})
 
 (def slots [:provider-compute :provider-dns :provider-backend])
+
+(def own-slots
+  "The slots this package selects and checks itself; the compute slot is
+  ONCE's."
+  [:provider-dns :provider-backend])
+
 (def profile-par (green-cli/par-name :profile))
 
 (def own-required
@@ -64,9 +112,14 @@
   [:postgres-admin-password :postgres-replication-password
    :backup-r2-access-key-id :backup-r2-secret-access-key])
 
+;; A VPC is discovered, never described. Accepting any of these would let one
+;; deployment place its nodes on another's network while still passing every
+;; other check, so their mere presence is an error rather than a warning.
+;; `:digitalocean-vpc-uuid` and `:digitalocean-vpc-cidr` are refused by ONCE's
+;; discovered-network rule with its own message; these are the spellings only
+;; this package refuses.
 (def forbidden-vpc-keys
-  [:digitalocean-vpc-id :digitalocean-vpc-uuid :digitalocean-vpc-cidr
-   :digitalocean-vpc-name :digitalocean-vpc])
+  [:digitalocean-vpc-id :digitalocean-vpc-name :digitalocean-vpc])
 
 (defn placeholder?
   [x]
@@ -76,7 +129,7 @@
 
 (defn entry [opts slot] (get-in providers [slot (get opts slot)]))
 (defn tofu-env [opts slot] (:tofu-env (entry opts slot) {}))
-(defn- slot-keys [opts field] (mapcat #(get (entry opts %) field []) slots))
+(defn- slot-keys [opts selected field] (mapcat #(get (entry opts %) field []) selected))
 (defn- missing [opts ks] (keep #(when (placeholder? (get opts %)) %) ks))
 
 (defn env-errors
@@ -88,27 +141,31 @@
 
 (def ^:private dns-re
   #"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$")
-(def ^:private cidr-re #"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])$")
 (def ^:private profile-re #"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
 (def ^:private identifier-re #"^[a-z_][a-z0-9_]{0,62}$")
 (def ^:private stanza-re #"^[a-z][a-z0-9-]{0,31}$")
 (def ^:private etcd-version-re #"^v[0-9]+\.[0-9]+\.[0-9]+$")
+;; A Debian version, not a release version: PGDG revisions its own packaging
+;; (`4.1.5-1.pgdg24.04+1`), and a pin that named only the upstream release
+;; would still let two converges install different bytes.
 (def ^:private deb-version-re #"^[0-9]+\.[0-9]+\.[0-9]+-[A-Za-z0-9.+~:-]+$")
 (def ^:private sha256-re #"^[0-9a-f]{64}$")
 (def ^:private oncalendar-re #"^[A-Za-z0-9 *,./:-]+$")
 (def ^:private https-re #"^https://[A-Za-z0-9.-]+(?::[0-9]+)?/?$")
 (def ^:private prefix-re #"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
-(defn valid-cidr?
-  [value]
-  (and (re-matches cidr-re (str value))
-       (every? #(<= 0 % 255)
-               (map parse-long
-                    (str/split (first (str/split (str value) #"/")) #"\.")))))
-
 (defn- positive-int? [x] (and (integer? x) (pos? x)))
 
 (def ^:private exclusive-port-keys
+  "Listeners that must each own a distinct port on every node.
+
+  `:postgres-port` is deliberately absent. PostgreSQL binds only the node's
+  private VPC address, while HAProxy binds only the public address and
+  loopback, so the primary listener is expected to reuse 5432 — a client
+  reaching `<cluster-host>:5432` and a replica streaming from
+  `<private-ip>:5432` never contend. Every other listener here shares an
+  address with at least one of the others, so a repeated number is a node that
+  half-starts."
   [:patroni-rest-port :etcd-client-port :etcd-peer-port
    :haproxy-primary-port :haproxy-replica-port :haproxy-stats-port
    :restore-check-port])
@@ -135,19 +192,26 @@
        (str k " must differ from :postgres-port")))))
 
 (defn state-errors
+  "Everything wrong with `opts` that does not depend on a credential. Empty
+  means the desired state renders. The missing keys are this package's, the
+  selected compute provider's (ONCE's `compute/required-keys`) and the other
+  slots'; the package's own rules follow; the Compute Cluster Standard's —
+  selection, the source lists, the provider and network rules, the topology —
+  are ONCE's over `spec`; and the ingress scope this package alone insists on
+  comes last."
   [opts]
   (vec
    (concat
     (map #(str % " is required")
-         (missing opts (concat own-required (slot-keys opts :required))))
+         (missing opts (concat own-required
+                               (compute/required-keys spec opts)
+                               (slot-keys opts own-slots :required))))
 
-    (for [slot slots
+    (for [slot own-slots
           :let [provider (get opts slot)]
           :when (not (contains? (get providers slot) provider))]
       (str "unsupported " slot " " (pr-str provider)))
 
-    (when-not (= "digitalocean" (:provider-compute opts))
-      [":provider-compute must be digitalocean"])
     (when-not (= "cloudflare" (:provider-dns opts))
       [":provider-dns must be cloudflare"])
     (when-not (boolean? (:compute-prevent-destroy opts))
@@ -181,16 +245,6 @@
                         (str/ends-with? (str (:cluster-host opts))
                                         (str "." (:cloudflare-zone opts))))))
       [":cluster-host must be inside :cloudflare-zone"])
-
-    (for [k [:digitalocean-ssh-sources :digitalocean-client-sources]
-          :let [values (get opts k)]
-          :when (or (not (sequential? values))
-                    (empty? values)
-                    (some (complement valid-cidr?) values))]
-      (str k " must be a non-empty list of IPv4 CIDRs"))
-    (for [k [:digitalocean-ssh-sources :digitalocean-client-sources]
-          :when (some #(= "0.0.0.0/0" (str %)) (get opts k))]
-      (str k " must not contain 0.0.0.0/0; administrative and database ingress stay scoped"))
 
     (when-not (positive-int? (:postgres-version opts))
       [":postgres-version must be a PostgreSQL major version integer such as 17"])
@@ -245,7 +299,8 @@
           :when (not (positive-int? (get opts k)))]
       (str k " must be a positive integer"))
     (distinct-port-errors opts)
-
+    ;; Cloudflare accepts 1 (automatic) or 60..86400. A short explicit TTL is
+    ;; what lets a replaced node leave the endpoint's address set quickly.
     (when-not (or (= 1 (:cloudflare-record-ttl opts))
                   (<= 60 (or (:cloudflare-record-ttl opts) 0) 86400))
       [":cloudflare-record-ttl must be 1 (automatic) or between 60 and 86400"])
@@ -265,15 +320,26 @@
                      (not (re-matches oncalendar-re (str v))))]
       (str k " must be a systemd OnCalendar expression"))
 
+    ;; The verified restore asserts that a heartbeat written after the last
+    ;; backup survived the round trip through the archive. Its tolerance has to
+    ;; leave room for `archive_timeout` plus the restore itself, or the check
+    ;; fails on a healthy cluster and stops meaning anything.
     (when-not (< 120 (or (:restore-check-max-lag-seconds opts) 0))
       [(str ":restore-check-max-lag-seconds must exceed 120; below that it "
             "fails on a healthy cluster, because a segment is only archived "
-            "once archive_timeout elapses")]))))
+            "once archive_timeout elapses")])
+
+    (cluster/state-errors spec opts)
+
+    ;; ONCE checks that each source list is non-empty and every entry a CIDR;
+    ;; the world is a CIDR, and refusing it is this package's own rule: the
+    ;; PostgreSQL port is a genuinely public port.
+    (for [k [:digitalocean-ssh-sources :digitalocean-client-sources]
+          :when (some #(= "0.0.0.0/0" %) (compute/cidrs opts k))]
+      (str k " must not contain 0.0.0.0/0; administrative and database ingress stay scoped")))))
 
 (defn secret-errors
   ([opts] (secret-errors opts slots))
   ([opts selected]
    (map #(str "required credential is not set: " (green-cli/par-name %))
-        (distinct
-         (missing opts (concat own-secrets
-                               (mapcat #(get (entry opts %) :secrets []) selected)))))))
+        (distinct (missing opts (concat own-secrets (slot-keys opts selected :secrets)))))))

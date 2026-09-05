@@ -37,6 +37,7 @@ import { homedir } from "node:os";
 // and break the development symlink at red/red.
 const PINS = {
   "package-postgres-agy-red": "github:getcolors/postgres-agy#a536c8e26e591403b3a8f9f96e7d6967b79fb8ed",
+  "package-once-red": "github:getcolors/once#b1628b7f8546c10fa9b768565bfd839512cb49ca",
   "red": "github:getcolors/red#db9bfe61282e2093f4098bf5a6ee0cd10added6e",
 };
 
