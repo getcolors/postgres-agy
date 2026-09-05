@@ -53,9 +53,19 @@
           - jq
           - python3-psycopg2
         state: present
+        # Always refresh: the DigitalOcean mirror's index and pool can disagree
+        # for minutes after an upstream security push (a 404 on a package the
+        # index still lists, seen live 2026-09-05), and a cache that looks
+        # fresh because cloud-init just wrote it repeats the same 404. Each
+        # retry refreshes the index and waits for the mirror to catch up.
         update_cache: true
-        cache_valid_time: 3600
         lock_timeout: 300
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: postgres_agy_apt_base
+      until: postgres_agy_apt_base is success
+      retries: 5
+      delay: 20
 
     - name: Install the PGDG repository signing key
       ansible.builtin.get_url:
@@ -83,6 +93,12 @@
           - python3-etcd
         state: present
         lock_timeout: 300
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: postgres_agy_apt_pg
+      until: postgres_agy_apt_pg is success
+      retries: 5
+      delay: 20
 
     - name: Hold Patroni and pgBackRest at the pinned versions
       ansible.builtin.dpkg_selections:
