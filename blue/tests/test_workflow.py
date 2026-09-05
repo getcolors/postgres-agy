@@ -1,7 +1,7 @@
 import pytest
 from blue.workflow import StepError
-from conftest import fixture
-from package_postgres_agy_blue import tools, workflow
+from conftest import fixture, optout
+from package_postgres_agy_blue import ssh, tools, workflow
 
 CREDENTIALS = {
     "COLORS_PAR_DO_TOKEN": "t", "COLORS_PAR_CLOUDFLARE_API_TOKEN": "t",
@@ -77,10 +77,28 @@ def test_delete_flow_edges():
             == (tools.ansible_local_step, "postgres-agy/dns"))
     assert (workflow.wire_fn("postgres-agy/dns", {"blue/event": "delete"})
             == (tools.dns_step, "postgres-agy/infrastructure"))
+    # The keypair goes after the compute destroy (ssh-keypair.md §3.3).
     assert (workflow.wire_fn("postgres-agy/infrastructure", {"blue/event": "delete"})
-            == (tools.infrastructure_step, "postgres-agy/generated-cleanup"))
+            == (tools.infrastructure_step, "postgres-agy/ssh-cleanup"))
+    assert (workflow.wire_fn("postgres-agy/ssh-cleanup", {"blue/event": "delete"})
+            == (ssh.cleanup_step, "postgres-agy/generated-cleanup"))
     assert (workflow.wire_fn("postgres-agy/generated-cleanup", {"blue/event": "delete"})
             == (tools.generated_cleanup_step,))
+
+
+async def test_a_build_fills_the_placeholder_key_paths():
+    # Every event fills the machine-key paths in preflight so the templates
+    # and the inventory render the same whichever step scaffolds them; a build
+    # gets the fixed placeholder, never the operator's home.
+    r = await workflow.start_step(fixture({"blue/event": "build"}), {})
+    assert r["blue/exit"] == 0
+    assert r["ssh-private-key-path"] == "/home/build-placeholder/.ssh/postgres-agy-fixture"
+    assert r["ssh-keygen"] is True
+    # Opt-out invents no key path.
+    o = await workflow.start_step(optout({"blue/event": "build"}), {})
+    assert o["blue/exit"] == 0
+    assert "ssh-private-key-path" not in o
+    assert "ssh-keygen" not in o
 
 
 async def test_build_preflight_succeeds_without_credentials():

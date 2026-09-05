@@ -35,3 +35,9 @@ local stage manages — one block marked with the profile, holding
 `Host <profile>` for node 1 and `Host <profile>-0`, `<profile>-1`,
 `<profile>-2` for each node. `--node N` picks which node to dispatch through
 (`--node 2` is `<profile>-1`); use a live one when the cluster is degraded.
+
+The deployment owns its SSH keypair (keygen mode: leave `digitalocean-ssh-keys`
+out of `colors.yml`; the first real `create` generates `~/.ssh/<profile>`,
+registers it at DigitalOcean and names it in the block, and `delete` removes
+it last). Supplying `digitalocean-ssh-keys` and `digitalocean-ssh-private-key`
+opts out and uses your own key untouched.

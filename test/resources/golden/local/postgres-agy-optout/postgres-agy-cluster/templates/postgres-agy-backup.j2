@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# postgres-agy-backup — run a full pgBackRest backup if this node is the leader.
+set -euo pipefail
+
+PATRONI_URL="http://{{ private_ip }}:8008"
+STANZA="main"
+
+if [ "$(id -un)" != postgres ]; then
+  exec sudo -n -u postgres -- "$0" "$@"
+fi
+
+if ! curl -fsS -o /dev/null --max-time 5 "$PATRONI_URL/primary"; then
+  echo "postgres-agy-backup: {{ inventory_hostname }} is not the leader; skipping backup"
+  exit 0
+fi
+
+echo "postgres-agy-backup: starting full backup of stanza $STANZA on {{ inventory_hostname }}"
+pgbackrest --stanza="$STANZA" --type=full backup
+echo "postgres-agy-backup: full backup finished"

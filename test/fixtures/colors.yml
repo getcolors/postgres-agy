@@ -1,3 +1,5 @@
+# Keygen-mode fixture: no digitalocean-ssh-keys, so the package owns the keypair
+# (ssh-keypair.md).
 profile: postgres-agy-fixture
 workdir: .colors
 
@@ -55,8 +57,6 @@ digitalocean-name: postgres-agy
 digitalocean-region: ams3
 digitalocean-size: s-2vcpu-4gb
 digitalocean-image: ubuntu-24-04-x64
-digitalocean-ssh-keys: "58495393"
-digitalocean-ssh-private-key: ~/.ssh/id_ed25519
 
 digitalocean-ssh-sources:
   - 129.159.242.163/32

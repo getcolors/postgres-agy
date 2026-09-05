@@ -12,6 +12,9 @@
 (def base
   (green-cli/read-state "test/fixtures/colors.yml" (slurp "test/fixtures/colors.yml")))
 
+(def optout
+  (green-cli/read-state "test/fixtures/optout.yml" (slurp "test/fixtures/optout.yml")))
+
 (def legacy-outputs
   "A pre-adoption state exactly as `tofu output -json` parsed it: the four
   outputs, two parallel lists among them, and no `params`."
@@ -173,10 +176,19 @@
             {:name "postgres-agy-fixture-2" :ip "203.0.113.3"}]
            (:ssh_hosts vars)))
     (is (= "present" (:block_state vars)))
-    (is (= "~/.ssh/id_ed25519" (:ssh_private_key vars)))
-    (testing "the pre-standard per-node blocks are named so the play can remove them"
-      (is (= ["postgres-agy-fixture-1" "postgres-agy-fixture-2" "postgres-agy-fixture-3"]
-             (:legacy_aliases vars)))))
+    (testing "the identity file is desired state a build knows and reaches the play through Selmer, in keygen mode only"
+      (is (= [:block_state :host_alias :ssh_hosts] (sort (keys vars))))
+      (let [data (:data (first (tools/ansible-local-specs base)))]
+        (is (true? (:ssh-keygen data)))
+        (is (= "~/.ssh/postgres-agy-fixture" (:ssh-config-identity-file data))))
+      (is (false? (:ssh-keygen (:data (first (tools/ansible-local-specs optout))))))))
+  (testing "the nodes are reached with the generated key in keygen mode, on a build through the placeholder, and with the operator's own key in opt-out mode"
+    (is (= "/home/build-placeholder/.ssh/postgres-agy-fixture"
+           (get-in (json/parse-string (tools/inventory (assoc base :green/event :build)) true)
+                   [:all :children :postgres :vars :ansible_ssh_private_key_file])))
+    (is (= "~/.ssh/id_ed25519"
+           (get-in (json/parse-string (tools/inventory optout) true)
+                   [:all :children :postgres :vars :ansible_ssh_private_key_file]))))
   (is (= "absent" (:block_state (tools/ansible-local-extra-vars (assoc base :green/event :delete)))))
   (testing "a build renders the play without an address"
     (let [rendered (slurp (io/resource "io/github/getcolors/postgres-agy/tools/ansible-local/main.yml"))]

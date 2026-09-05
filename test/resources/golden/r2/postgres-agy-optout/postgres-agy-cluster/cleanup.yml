@@ -1,0 +1,56 @@
+---
+- name: Tear down the PostgreSQL failover cluster services
+  hosts: postgres
+  gather_facts: false
+  tasks:
+    - name: Stop and disable scheduled timers
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop:
+        - postgres-agy-heartbeat.timer
+        - postgres-agy-backup.timer
+        - postgres-agy-restore-check.timer
+      failed_when: false
+
+    - name: Stop and disable services
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop:
+        - haproxy
+        - patroni
+        - etcd
+      failed_when: false
+
+    - name: Remove installed units
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ item }}"
+        state: absent
+      loop:
+        - etcd.service
+        - patroni.service
+        - postgres-agy-heartbeat.service
+        - postgres-agy-heartbeat.timer
+        - postgres-agy-backup.service
+        - postgres-agy-backup.timer
+        - postgres-agy-restore-check.service
+        - postgres-agy-restore-check.timer
+      failed_when: false
+
+    - name: Remove installed scripts
+      ansible.builtin.file:
+        path: "/usr/local/bin/{{ item }}"
+        state: absent
+      loop:
+        - postgres-agy-heartbeat
+        - postgres-agy-backup
+        - postgres-agy-restore-check
+      failed_when: false
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      failed_when: false

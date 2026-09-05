@@ -13,8 +13,9 @@ provider "digitalocean" {}
 locals {
   name           = "<{ digitalocean-name }>"
   node_names     = <{ node-names-hcl|safe }>
-  ssh_keys       = <{ ssh-keys-hcl|safe }>
-  ssh_sources    = <{ ssh-sources-hcl|safe }>
+<% if ssh-keygen %>  ssh_keys       = [digitalocean_ssh_key.machine.id]
+<% else %>  ssh_keys       = <{ ssh-keys-hcl|safe }>
+<% endif %>  ssh_sources    = <{ ssh-sources-hcl|safe }>
   client_sources = <{ client-sources-hcl|safe }>
 }
 
@@ -22,7 +23,18 @@ data "digitalocean_vpc" "default" {
   region = "<{ digitalocean-region }>"
 }
 
-resource "digitalocean_droplet" "node" {
+<% if ssh-keygen %># Keygen mode (workspace standards/ssh-keypair.md): the account key is named
+# after the profile and lives in this stack's state, which is what makes its
+# ownership decidable. One key for the cluster, not one per node — the
+# deployment is one thing, and a key per machine would multiply what the
+# standard exists to make singular. Never reference a literal key id here in
+# keygen mode.
+resource "digitalocean_ssh_key" "machine" {
+  name       = "<{ profile }>"
+  public_key = trimspace(file("<{ ssh-public-key-path }>"))
+}
+
+<% endif %>resource "digitalocean_droplet" "node" {
   count    = length(local.node_names)
   name     = local.node_names[count.index]
   region   = "<{ digitalocean-region }>"
@@ -119,7 +131,8 @@ output "node_private_ips" {
 output "params" {
   value = {
     provider     = "digitalocean"
-    vpc_id       = data.digitalocean_vpc.default.id
+<% if ssh-keygen %>    ssh_key_id   = digitalocean_ssh_key.machine.id
+<% endif %>    vpc_id       = data.digitalocean_vpc.default.id
     vpc_ip_range = data.digitalocean_vpc.default.ip_range
     nodes = [for i, d in digitalocean_droplet.node : {
       index  = i

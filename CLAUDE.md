@@ -62,10 +62,25 @@ election and failover. The provider registry is package-owned in each colour's
 
 The package pins the SDK — Green in `green/deps.edn`, the Red SDK in
 `red/package.json`, the Blue SDK in `blue/pyproject.toml` — and ONCE, in the
-same three manifests, for one namespace: `compute-cluster`
-(`io.github.getcolors.once.compute-cluster`, `package-once-red`'s
-`computeCluster`, `package_once_blue.compute_cluster`), the one implementation
-of the Compute Cluster Standard (`workspace/standards/compute-cluster.md`).
+same three manifests and in the red payload's `PINS`, for two namespaces:
+`compute-cluster` (`io.github.getcolors.once.compute-cluster`,
+`package-once-red`'s `computeCluster`, `package_once_blue.compute_cluster`),
+the one implementation of the Compute Cluster Standard
+(`workspace/standards/compute-cluster.md`), and `ssh`
+(`io.github.getcolors.once.ssh`, ONCE's unexported `red/src/ssh.ts` reached
+through `red/src/once.ts`, `package_once_blue.ssh`), the reference
+implementation of the SSH Keypair Standard (`workspace/standards/ssh-keypair.md`).
+The package's `ssh` module wraps ONCE's with the build placeholder; its
+`ssh_config` module and its `ansible-local` play are its own copies of the
+multi-node shape every DB package carries (`workspace/standards/ssh-config.md`
+§7; `workspace/scripts/package-copies.py` gates the copies). Keygen mode is
+the absence of `digitalocean-ssh-keys`; `digitalocean-ssh-private-key` is
+required in opt-out mode only. On a real create the keypair matrix and the
+DigitalOcean key preflight run in `start-step` before anything renders; the
+keypair is removed last on delete, after the destroy. The goldens have two
+fixtures, `test/fixtures/colors.yml` (keygen) and `test/fixtures/optout.yml`
+(opt-out, byte-for-byte the pre-standard rendering under its own profile),
+each under both state backends.
 The package owns its provider registry, its OpenTofu templates and its stage
 names; its `compute-providers` registry and `spec` (one homogeneous role of
 `cluster-nodes` nodes, fallback offset 11, the `10.114.0.0/20` fallback
@@ -80,8 +95,9 @@ pre-adoption state, which recorded only the parallel
 `node_public_ips`/`node_private_ips` lists, is translated into the same shape
 by the reader in `tools`, and refused when the lists disagree. The
 `~/.ssh/config` block is the SSH Config Standard's: one block marked with the
-profile, `Host <profile>` for node 1 and `<profile>-<index>` per node; the
-play removes the pre-standard per-node blocks for one pin cycle. Use
+profile, `Host <profile>` for node 1 and `<profile>-<index>` per node, with
+the `IdentityFile` pair in keygen mode; the one-cycle removal of the
+pre-standard per-node blocks has run its cycle and is gone. Use
 `POSTGRES_AGY_LIB_ROOT` (the repository root, for every colour; red also
 accepts the `red/` dir directly), `GREEN_LIB_ROOT` and `ONCE_LIB_ROOT` for
 working-tree development. Final launchers use a pushed SHA managed by

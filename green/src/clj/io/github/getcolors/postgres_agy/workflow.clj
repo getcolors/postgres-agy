@@ -19,6 +19,8 @@
             [green.progress :as progress]
             [green.workflow :as wf]
             [io.github.getcolors.once.compute-cluster :as cluster]
+            [io.github.getcolors.postgres-agy.ssh :as ssh]
+            [io.github.getcolors.postgres-agy.ssh-config :as ssh-config]
             [io.github.getcolors.postgres-agy.tools :as tools]
             [io.github.getcolors.postgres-agy.validate :as validate]))
 
@@ -100,9 +102,22 @@
                   (green-cli/par-name :compute-prevent-destroy)
                   "=false for this one delete")]))]
        :after-validate
-       (fn [opts _ ctx]
-         (cond-> (assoc opts :green/exit 0)
-           (real-lifecycle-event? ctx) (assoc :postgres-agy/state state)))}
+       ;; The machine key's create matrix and the DigitalOcean preflight run
+       ;; before any template is rendered: an unowned key on disk or at the
+       ;; provider stops the run while stopping is still free. Every other
+       ;; event fills the same template values — a destroy renders before it
+       ;; destroys — but checks no key, because the delete's key cleanup runs
+       ;; after the compute destroy.
+       (fn [opts _ {:keys [event real?] :as ctx}]
+         (let [opts (cond-> opts (real-lifecycle-event? ctx) (assoc :postgres-agy/state state))]
+           (if (and real? (= :create event))
+             (let [opts (ssh/ensure-key! opts (fn [_] (:params state)))]
+               (if (wf/failed? opts)
+                 opts
+                 (let [opts (ssh/preflight! (ssh/with-machine-key opts))
+                       opts (if (wf/failed? opts) opts (ssh-config/preflight! opts))]
+                   (if (wf/failed? opts) opts (assoc opts :green/exit 0)))))
+             (assoc (ssh/with-machine-key opts) :green/exit 0))))}
       env))))
 
 (defn wire-fn
@@ -115,8 +130,11 @@
       :postgres-agy/cluster [tools/cluster-step :postgres-agy/ansible-local]
       :postgres-agy/ansible-local [tools/ansible-local-step :postgres-agy/dns]
       :postgres-agy/dns [tools/dns-step :postgres-agy/infrastructure]
-      :postgres-agy/infrastructure [tools/infrastructure-step
-                                   :postgres-agy/generated-cleanup]
+      ;; The keypair goes after the compute destroy (ssh-keypair.md §3.3): a
+      ;; key that predeceases its hosts locks the operator out of nodes that
+      ;; still exist.
+      :postgres-agy/infrastructure [tools/infrastructure-step :postgres-agy/ssh-cleanup]
+      :postgres-agy/ssh-cleanup [ssh/cleanup-step :postgres-agy/generated-cleanup]
       :postgres-agy/generated-cleanup [tools/generated-cleanup-step])
     (case step
       :postgres-agy/start [start-step :postgres-agy/infrastructure]
@@ -135,7 +153,7 @@
 (def side-effecting-steps
   [:postgres-agy/load-infrastructure :postgres-agy/infrastructure
    :postgres-agy/dns :postgres-agy/ansible-local :postgres-agy/cluster
-   :postgres-agy/acceptance :postgres-agy/generated-cleanup])
+   :postgres-agy/acceptance :postgres-agy/ssh-cleanup :postgres-agy/generated-cleanup])
 
 (def workflow
   (-> (wf/workflow {:start :postgres-agy/start :wire-fn wire-fn})

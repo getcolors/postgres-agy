@@ -7,15 +7,22 @@ import { join } from "node:path";
 import { StepError, type Opts } from "red/workflow";
 import { computeCluster } from "package-once-red";
 import * as operator from "../src/operator.ts";
+import * as ssh from "../src/ssh.ts";
+import * as sshConfig from "../src/ssh-config.ts";
 import * as tools from "../src/tools.ts";
 import * as utils from "../src/utils.ts";
 import * as validate from "../src/validate.ts";
 import * as workflow from "../src/workflow.ts";
 
 const fixtureFile = join(import.meta.dir, "../../test/fixtures/colors.yml");
+const optoutFile = join(import.meta.dir, "../../test/fixtures/optout.yml");
 
 function fixture(overrides: Opts = {}): Opts {
   return { ...(Bun.YAML.parse(readFileSync(fixtureFile, "utf8")) as Opts), ...overrides };
+}
+
+function optout(overrides: Opts = {}): Opts {
+  return { ...(Bun.YAML.parse(readFileSync(optoutFile, "utf8")) as Opts), ...overrides };
 }
 
 // --- utils -------------------------------------------------------------------
@@ -60,6 +67,25 @@ describe("utils", () => {
 describe("validate", () => {
   test("default fixture produces no errors", () => {
     expect(validate.stateErrors(fixture())).toEqual([]);
+  });
+
+  test("both keypair modes are renderable", () => {
+    // The SSH Keypair Standard has two modes and conformance means both hold.
+    expect(validate.stateErrors(optout())).toEqual([]);
+    expect(validate.keygen(fixture())).toBe(true);
+    expect(validate.keygen(optout())).toBe(false);
+    // The machine key is never required: its absence is keygen mode.
+    expect(validate.stateErrors(fixture()).some((e) => e.includes("digitalocean-ssh-keys"))).toBe(false);
+  });
+
+  test("the private key path is desired state in opt-out mode only", () => {
+    const o = optout();
+    delete o["digitalocean-ssh-private-key"];
+    expect(validate.stateErrors(o))
+      .toContain(":digitalocean-ssh-private-key is required when digitalocean-ssh-keys is supplied");
+    const k = fixture();
+    delete k["digitalocean-ssh-private-key"];
+    expect(validate.stateErrors(k)).toEqual([]);
   });
 
   test("COLORS_PAR_PROFILE is rejected", () => {
@@ -361,9 +387,19 @@ describe("tools", () => {
       { name: "postgres-agy-fixture-2", ip: "203.0.113.3" },
     ]);
     expect(vars.block_state).toBe("present");
-    expect(vars.ssh_private_key).toBe("~/.ssh/id_ed25519");
-    // the pre-standard per-node blocks are named so the play can remove them
-    expect(vars.legacy_aliases).toEqual(["postgres-agy-fixture-1", "postgres-agy-fixture-2", "postgres-agy-fixture-3"]);
+    // The identity file is desired state a build knows and reaches the play
+    // through Selmer, in keygen mode only.
+    expect(Object.keys(vars).sort()).toEqual(["block_state", "host_alias", "ssh_hosts"]);
+    const data = tools.ansibleLocalSpecs(fixture())[0]!.data as Opts;
+    expect(data["ssh-keygen"]).toBe(true);
+    expect(data["ssh-config-identity-file"]).toBe("~/.ssh/postgres-agy-fixture");
+    expect((tools.ansibleLocalSpecs(optout())[0]!.data as Opts)["ssh-keygen"]).toBe(false);
+    // The nodes are reached with the generated key in keygen mode, on a build
+    // through the placeholder, and with the operator's own key in opt-out mode.
+    expect(JSON.parse(tools.inventory(fixture({ "red/event": "build" }))).all.children.postgres.vars.ansible_ssh_private_key_file)
+      .toBe("/home/build-placeholder/.ssh/postgres-agy-fixture");
+    expect(JSON.parse(tools.inventory(optout())).all.children.postgres.vars.ansible_ssh_private_key_file)
+      .toBe("~/.ssh/id_ed25519");
     expect(tools.ansibleLocalExtraVars(fixture({ "red/event": "delete" })).block_state).toBe("absent");
     // a build renders the play without an address
     const rendered = readFileSync(join(import.meta.dir, "../resources/tools/ansible-local/main.yml"), "utf8");
@@ -457,10 +493,28 @@ describe("workflow", () => {
       .toEqual([tools.ansibleLocalStep, "postgres-agy/dns"]);
     expect(workflow.wireFn("postgres-agy/dns", { "red/event": "delete" }))
       .toEqual([tools.dnsStep, "postgres-agy/infrastructure"]);
+    // The keypair goes after the compute destroy (ssh-keypair.md §3.3).
     expect(workflow.wireFn("postgres-agy/infrastructure", { "red/event": "delete" }))
-      .toEqual([tools.infrastructureStep, "postgres-agy/generated-cleanup"]);
+      .toEqual([tools.infrastructureStep, "postgres-agy/ssh-cleanup"]);
+    expect(workflow.wireFn("postgres-agy/ssh-cleanup", { "red/event": "delete" }))
+      .toEqual([ssh.cleanupStep, "postgres-agy/generated-cleanup"]);
     expect(workflow.wireFn("postgres-agy/generated-cleanup", { "red/event": "delete" }))
       .toEqual([tools.generatedCleanupStep]);
+  });
+
+  test("a build fills the placeholder key paths", async () => {
+    // Every event fills the machine-key paths in preflight so the templates
+    // and the inventory render the same whichever step scaffolds them; a build
+    // gets the fixed placeholder, never the operator's home.
+    const r = await workflow.startStep(fixture({ "red/event": "build" }), {});
+    expect(r["red/exit"]).toBe(0);
+    expect(r["ssh-private-key-path"]).toBe("/home/build-placeholder/.ssh/postgres-agy-fixture");
+    expect(r["ssh-keygen"]).toBe(true);
+    // Opt-out invents no key path.
+    const o = await workflow.startStep(optout({ "red/event": "build" }), {});
+    expect(o["red/exit"]).toBe(0);
+    expect(o["ssh-private-key-path"]).toBeUndefined();
+    expect(o["ssh-keygen"]).toBeUndefined();
   });
 
   test("build preflight succeeds without credentials", async () => {
@@ -656,5 +710,107 @@ describe("operator", () => {
     const result = await operator.run(fixtureFile, "status", ["--node", "4"], runner, {});
     expect(result["red/exit"]).toBe(2);
     expect(String(result["red/err"])).toContain("--node must be between 1 and 3");
+  });
+});
+
+// --- the machine keypair -----------------------------------------------------
+
+describe("ssh", () => {
+  test("a build never names the operator's home", () => {
+    // Committed goldens must mean the same thing on every workstation, so a
+    // build renders a fixed placeholder rather than reading ~/.ssh.
+    const opts = ssh.withMachineKey(fixture({ "red/event": "build" }));
+    expect(opts["ssh-private-key-path"]).toBe("/home/build-placeholder/.ssh/postgres-agy-fixture");
+    expect(opts["ssh-public-key-path"]).toBe("/home/build-placeholder/.ssh/postgres-agy-fixture.pub");
+    // The placeholder lands on the provider's own machine-key key.
+    expect(opts["digitalocean-ssh-keys"]).toBe("/home/build-placeholder/.ssh/postgres-agy-fixture.pub");
+    expect(String(process.env.HOME)).not.toContain("build-placeholder");
+  });
+
+  test("a dry-run is held to the same rule as a build", () => {
+    expect(ssh.renderedOnly({ "red/event": "build" })).toBe(true);
+    expect(ssh.renderedOnly({ "red/event": "create", "red/dry-run": true })).toBe(true);
+    expect(ssh.renderedOnly({ "red/event": "create" })).toBe(false);
+    expect(ssh.withMachineKey(fixture({ "red/event": "create", "red/dry-run": true }))["ssh-private-key-path"])
+      .toBe("/home/build-placeholder/.ssh/postgres-agy-fixture");
+  });
+
+  test("real events render the real path", () => {
+    const opts = ssh.withMachineKey(fixture({ "red/event": "create" }));
+    expect(String(opts["ssh-private-key-path"])).not.toContain("build-placeholder");
+    expect(String(opts["ssh-private-key-path"]).endsWith("/.ssh/postgres-agy-fixture")).toBe(true);
+  });
+
+  test("opt-out opts pass through untouched", () => {
+    const opts = optout({ "red/event": "build" });
+    expect(ssh.withMachineKey(opts)).toEqual(opts);
+    expect(ssh.withMachineKey(opts)["ssh-private-key-path"]).toBeUndefined();
+  });
+});
+
+// --- ~/.ssh/config -----------------------------------------------------------
+
+describe("ssh-config", () => {
+  const opts = fixture({ profile: "postgres-agy-digitalocean" });
+
+  test("the deployment claims one alias per node and the bare profile", () => {
+    expect(sshConfig.aliases(opts)).toEqual(
+      ["postgres-agy-digitalocean", "postgres-agy-digitalocean-0", "postgres-agy-digitalocean-1", "postgres-agy-digitalocean-2"]);
+  });
+
+  test("the identity file stays unexpanded", () => {
+    expect(sshConfig.identityFile(opts)).toBe("~/.ssh/postgres-agy-digitalocean");
+  });
+
+  test("a foreign stanza is found for any alias, not just the first", () => {
+    const lines = "Host something\n  HostName 1.2.3.4\n\nHost postgres-agy-digitalocean-2\n  HostName 5.6.7.8\n"
+      .split("\n");
+    expect(sshConfig.foreignStanzaLine(lines, "postgres-agy-digitalocean")).toBeUndefined();
+    expect(sshConfig.foreignStanzaLine(lines, "postgres-agy-digitalocean-2")).toBe(4);
+  });
+
+  test("our own managed block is not foreign for any alias in it", () => {
+    const lines = [
+      "# BEGIN postgres-agy-digitalocean ANSIBLE MANAGED BLOCK",
+      "Host postgres-agy-digitalocean", "  HostName 1.2.3.4",
+      "Host postgres-agy-digitalocean-0", "  HostName 1.2.3.4",
+      "Host postgres-agy-digitalocean-1", "  HostName 1.2.3.5",
+      "Host postgres-agy-digitalocean-2", "  HostName 1.2.3.6",
+      "# END postgres-agy-digitalocean ANSIBLE MANAGED BLOCK",
+    ];
+    for (const alias of sshConfig.aliases(opts)) {
+      expect(sshConfig.foreignStanzaLine(lines, alias, "postgres-agy-digitalocean")).toBeUndefined();
+    }
+  });
+
+  test("a node stanza outside our block is still foreign", () => {
+    const lines = [
+      "# BEGIN postgres-agy-digitalocean ANSIBLE MANAGED BLOCK",
+      "Host postgres-agy-digitalocean", "  HostName 1.2.3.4",
+      "# END postgres-agy-digitalocean ANSIBLE MANAGED BLOCK",
+      "Host postgres-agy-digitalocean-1", "  HostName 9.9.9.9",
+    ];
+    expect(sshConfig.foreignStanzaLine(lines, "postgres-agy-digitalocean-1", "postgres-agy-digitalocean")).toBe(5);
+  });
+
+  test("a global option above the first Host blocks the run", () => {
+    expect(sshConfig.leadingOptionLine(["ServerAliveInterval 60", "Host x"])).toBe(1);
+    expect(sshConfig.leadingOptionLine(["# a comment", "", "Host x", "  User root"]))
+      .toBeUndefined();
+    expect(sshConfig.leadingOptionLine(["Host x", "  ServerAliveInterval 60"])).toBeUndefined();
+  });
+
+  test("the refusal is reported as a failed step", () => {
+    const refused = sshConfig.preflight(opts, {
+      adoptError: () => "no",
+      placementError: () => undefined,
+    });
+    expect(refused["red/exit"]).toBe(1);
+    expect(refused["red/err"]).toBe("no");
+    const passed = sshConfig.preflight(opts, {
+      adoptError: () => undefined,
+      placementError: () => undefined,
+    });
+    expect(passed["red/exit"]).toBeUndefined();
   });
 });

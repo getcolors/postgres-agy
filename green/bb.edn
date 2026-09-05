@@ -4,12 +4,16 @@
  {test {:doc "Run unit tests under Babashka"
         :requires ([clojure.test :as t]
                    [io.github.getcolors.postgres-agy.validate-test]
+                   [io.github.getcolors.postgres-agy.ssh-test]
+                   [io.github.getcolors.postgres-agy.ssh-config-test]
                    [io.github.getcolors.postgres-agy.utils-test]
                    [io.github.getcolors.postgres-agy.tools-test]
                    [io.github.getcolors.postgres-agy.workflow-test]
                    [io.github.getcolors.postgres-agy.operator-test])
         :task (let [{:keys [fail error]}
                     (t/run-tests 'io.github.getcolors.postgres-agy.validate-test
+                                 'io.github.getcolors.postgres-agy.ssh-test
+                                 'io.github.getcolors.postgres-agy.ssh-config-test
                                  'io.github.getcolors.postgres-agy.utils-test
                                  'io.github.getcolors.postgres-agy.tools-test
                                  'io.github.getcolors.postgres-agy.workflow-test

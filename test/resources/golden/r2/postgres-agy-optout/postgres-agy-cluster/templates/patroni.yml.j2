@@ -1,0 +1,87 @@
+scope: postgres-agy
+name: {{ inventory_hostname }}
+namespace: /colors/
+
+restapi:
+  listen: {{ private_ip }}:8008
+  connect_address: {{ private_ip }}:8008
+
+etcd3:
+  hosts:
+{% for host in groups['postgres'] | sort %}
+    - {{ hostvars[host].private_ip }}:2379
+{% endfor %}
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    synchronous_mode: true
+    synchronous_node_count: 1
+    synchronous_mode_strict: false
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        max_connections: 200
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_log_hints: "on"
+        wal_keep_size: 1024MB
+        archive_mode: "on"
+        archive_command: "pgbackrest --stanza=main archive-push %p"
+        archive_timeout: 60s
+        restore_command: "pgbackrest --stanza=main archive-get %f %p"
+        password_encryption: scram-sha-256
+        unix_socket_directories: /var/run/postgresql
+        shared_buffers: 1GB
+        effective_cache_size: 2GB
+        maintenance_work_mem: 256MB
+        checkpoint_completion_target: 0.9
+        random_page_cost: 1.1
+        log_min_duration_statement: 1000
+        log_checkpoints: "on"
+        log_connections: "off"
+  initdb:
+    - encoding: UTF8
+    - locale: C.UTF-8
+    - data-checksums
+
+postgresql:
+  listen: {{ private_ip }}:5432
+  connect_address: {{ private_ip }}:5432
+  data_dir: /var/lib/postgresql/17/main
+  bin_dir: /usr/lib/postgresql/17/bin
+  pgpass: /var/lib/postgresql/.pgpass_patroni
+  authentication:
+    replication:
+      username: replicator
+      password: "{{ lookup('env','COLORS_PAR_POSTGRES_REPLICATION_PASSWORD') }}"
+    superuser:
+      username: postgres
+      password: "{{ lookup('env','COLORS_PAR_POSTGRES_ADMIN_PASSWORD') }}"
+    rewind:
+      username: postgres
+      password: "{{ lookup('env','COLORS_PAR_POSTGRES_ADMIN_PASSWORD') }}"
+  parameters:
+    unix_socket_directories: /var/run/postgresql
+  pg_hba:
+    - local all all peer
+    - local replication all peer
+    - host all all 127.0.0.1/32 scram-sha-256
+    - host all all {{ vpc_cidr }} scram-sha-256
+    - host replication replicator {{ vpc_cidr }} scram-sha-256
+  create_replica_methods:
+    - basebackup
+  basebackup:
+    max-rate: 100M
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

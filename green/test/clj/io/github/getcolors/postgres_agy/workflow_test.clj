@@ -3,11 +3,15 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [green.cli :as green-cli]
+            [io.github.getcolors.postgres-agy.ssh :as ssh]
             [io.github.getcolors.postgres-agy.tools :as tools]
             [io.github.getcolors.postgres-agy.workflow :as workflow]))
 
 (def base
   (green-cli/read-state "test/fixtures/colors.yml" (slurp "test/fixtures/colors.yml")))
+
+(def optout
+  (green-cli/read-state "test/fixtures/optout.yml" (slurp "test/fixtures/optout.yml")))
 
 (def credentials
   {"COLORS_PAR_DO_TOKEN" "t"
@@ -69,10 +73,27 @@
            (workflow/wire-fn :postgres-agy/ansible-local {:green/event :delete})))
     (is (= [io.github.getcolors.postgres-agy.tools/dns-step :postgres-agy/infrastructure]
            (workflow/wire-fn :postgres-agy/dns {:green/event :delete})))
-    (is (= [io.github.getcolors.postgres-agy.tools/infrastructure-step :postgres-agy/generated-cleanup]
-           (workflow/wire-fn :postgres-agy/infrastructure {:green/event :delete})))
+    (testing "the keypair goes after the compute destroy (ssh-keypair.md §3.3)"
+      (is (= [io.github.getcolors.postgres-agy.tools/infrastructure-step :postgres-agy/ssh-cleanup]
+             (workflow/wire-fn :postgres-agy/infrastructure {:green/event :delete})))
+      (is (= [ssh/cleanup-step :postgres-agy/generated-cleanup]
+             (workflow/wire-fn :postgres-agy/ssh-cleanup {:green/event :delete}))))
     (is (= [io.github.getcolors.postgres-agy.tools/generated-cleanup-step]
            (workflow/wire-fn :postgres-agy/generated-cleanup {:green/event :delete})))))
+
+(deftest a-build-fills-the-placeholder-key-paths
+  ;; Every event fills the machine-key paths in preflight so the templates and
+  ;; the inventory render the same whichever step scaffolds them; a build gets
+  ;; the fixed placeholder, never the operator's home.
+  (let [r (workflow/start-step (assoc base :green/event :build) {})]
+    (is (= 0 (:green/exit r)))
+    (is (= "/home/build-placeholder/.ssh/postgres-agy-fixture" (:ssh-private-key-path r)))
+    (is (true? (:ssh-keygen r))))
+  (testing "opt-out invents no key path"
+    (let [r (workflow/start-step (assoc optout :green/event :build) {})]
+      (is (= 0 (:green/exit r)))
+      (is (nil? (:ssh-private-key-path r)))
+      (is (nil? (:ssh-keygen r))))))
 
 (deftest preflight-test
   (testing "build preflight succeeds without credentials"

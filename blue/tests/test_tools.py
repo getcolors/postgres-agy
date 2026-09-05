@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 from blue.workflow import StepError
-from conftest import fixture
+from conftest import fixture, optout
 from package_once_blue import compute_cluster as cluster
 from package_postgres_agy_blue import tools, validate
 
@@ -195,9 +195,21 @@ def test_the_local_play_receives_one_block_of_aliases():
         {"name": "postgres-agy-fixture-2", "ip": "203.0.113.3"},
     ]
     assert variables["block_state"] == "present"
-    assert variables["ssh_private_key"] == "~/.ssh/id_ed25519"
-    # the pre-standard per-node blocks are named so the play can remove them
-    assert variables["legacy_aliases"] == ["postgres-agy-fixture-1", "postgres-agy-fixture-2", "postgres-agy-fixture-3"]
+    # The identity file is desired state a build knows and reaches the play
+    # through Selmer, in keygen mode only.
+    assert sorted(variables) == ["block_state", "host_alias", "ssh_hosts"]
+    data = tools.ansible_local_specs(fixture())[0]["data"]
+    assert data["ssh-keygen"] is True
+    assert data["ssh-config-identity-file"] == "~/.ssh/postgres-agy-fixture"
+    assert tools.ansible_local_specs(optout())[0]["data"]["ssh-keygen"] is False
+    # The nodes are reached with the generated key in keygen mode, on a build
+    # through the placeholder, and with the operator's own key in opt-out mode.
+    built = json.loads(tools.inventory(fixture({"blue/event": "build"})))
+    assert built["all"]["children"]["postgres"]["vars"]["ansible_ssh_private_key_file"] == \
+        "/home/build-placeholder/.ssh/postgres-agy-fixture"
+    opted_out = json.loads(tools.inventory(optout()))
+    assert opted_out["all"]["children"]["postgres"]["vars"]["ansible_ssh_private_key_file"] == \
+        "~/.ssh/id_ed25519"
     assert tools.ansible_local_extra_vars(fixture({"blue/event": "delete"}))["block_state"] == "absent"
     # a build renders the play without an address
     rendered = (Path(tools.ROOT) / "tools/ansible-local/main.yml").read_text()
