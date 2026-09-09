@@ -44,7 +44,7 @@
 ;; a launcher that cannot resolve its own library says so rather than inventing
 ;; a SHA or silently falling back to whatever is lying around. `bb pin` refuses
 ;; to stamp a dirty or unpushed HEAD for the same reason.
-(def ^:private postgres-agy-sha "e107da6ffcc97951fde033f1b55ccf69136d81c0")
+(def ^:private postgres-agy-sha "01f94c159d1ebb0f733ea36dbbe9a1112d94e89c")
 
 (def ^:private postgres-agy-git-url "https://github.com/getcolors/postgres-agy.git")
 (def ^:private green-git-url "https://github.com/getcolors/green.git")
