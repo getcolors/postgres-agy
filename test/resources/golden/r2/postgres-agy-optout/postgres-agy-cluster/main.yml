@@ -11,7 +11,7 @@
     stanza: "main"
     data_dir: "/var/lib/postgresql/17/main"
     bin_dir: "/usr/lib/postgresql/17/bin"
-    vpc_cidr: "10.114.0.0/20"
+    vpc_cidr: "10.0.0.0/24"
     leader_roles: ["leader", "master", "standby_leader"]
 
   handlers:

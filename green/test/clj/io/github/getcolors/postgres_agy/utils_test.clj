@@ -11,9 +11,7 @@
     (is (= 3 utils/node-count))
     (is (= [1 2 3] (utils/ordinals))))
 
-  (testing "node naming"
-    (is (= "postgres-agy-1" (utils/node-name {:digitalocean-name "postgres-agy"} 1)))
-    (is (= "my-pg-2" (utils/node-name {:digitalocean-name "my-pg"} 2))))
+
 
   (testing "par lookup formatting"
     (is (= "{{ lookup('env','COLORS_PAR_POSTGRES_ADMIN_PASSWORD') }}"

@@ -58,41 +58,18 @@ checks() {
     [ -d "$base/$stage" ] || { echo "golden: $profile is missing stage $stage" >&2; exit 1; }
   done
 
-  local infra="$base/postgres-agy-infrastructure/main.tf"
-  grep -q 'resource "digitalocean_droplet" "node"' "$infra"
-  grep -q 'resource "digitalocean_firewall" "cluster"' "$infra"
-  grep -q 'data "digitalocean_vpc" "default"' "$infra"
-  grep -q 'output "vpc_id"' "$infra"
-  grep -q 'output "node_public_ips"' "$infra"
-  grep -q 'output "node_private_ips"' "$infra"
-  grep -q 'output "params"' "$infra"
-  grep -q '129.159.242.163/32' "$infra"
-  [ "$(grep -c 'prevent_destroy = true' "$infra")" -ge 2 ] || {
-    echo "golden: $profile: deployment-owned infrastructure lost prevent_destroy" >&2; exit 1
-  }
-  if grep -q '0.0.0.0/0.*source' "$infra"; then
-    echo "golden: $profile: node ingress is open to the world" >&2
-    exit 1
-  fi
-  # The SSH Keypair Standard, both modes: keygen declares the profile-named key
-  # resource and references it by attribute; opt-out keeps the literal list and
-  # creates nothing.
+  # Compute documents are library-owned; this package checks its topology and
+  # the SSH identities consumed by application stages.
+  [ -d "$base/postgres-agy-infrastructure/shared" ] || exit 1
+  for node in 0 1 2; do
+    [ -f "$base/postgres-agy-infrastructure/nodes/$node/node.tf.json" ] || exit 1
+  done
   if [ "$fixture" = colors ]; then
-    grep -q 'resource "digitalocean_ssh_key" "machine"' "$infra" || { echo "golden: $profile: keygen mode declares no key resource" >&2; exit 1; }
-    grep -q 'ssh_keys       = \[digitalocean_ssh_key.machine.id\]' "$infra" || { echo "golden: $profile: keygen mode does not reference the key by attribute" >&2; exit 1; }
-    grep -q 'ssh_key_id   = digitalocean_ssh_key.machine.id' "$infra" || { echo "golden: $profile: params carries no ssh_key_id" >&2; exit 1; }
-    grep -q 'IdentityFile ~/.ssh/postgres-agy-fixture' "$base/postgres-agy-ansible-local/main.yml" || { echo "golden: $profile: the local stage names no identity file" >&2; exit 1; }
-    grep -q '"ansible_ssh_private_key_file" : "/home/build-placeholder/.ssh/postgres-agy-fixture"' "$base/postgres-agy-cluster/inventory.json" || { echo "golden: $profile: the inventory does not name the generated key" >&2; exit 1; }
+    grep -q "IdentityFile ~/.ssh/$profile" "$base/postgres-agy-ansible-local/main.yml" || exit 1
   else
-    ! grep -q 'digitalocean_ssh_key' "$infra" || { echo "golden: $profile: opt-out mode must create no key" >&2; exit 1; }
-    grep -qE '^\s+ssh_keys\s+= \["' "$infra" || { echo "golden: $profile: opt-out mode lost the literal key list" >&2; exit 1; }
-    ! grep -qE '^\s+IdentityFile ' "$base/postgres-agy-ansible-local/main.yml" || { echo "golden: $profile: opt-out mode must not guess an identity file" >&2; exit 1; }
+    grep -q 'IdentityFile ~/.ssh/id_ed25519' "$base/postgres-agy-ansible-local/main.yml" || exit 1
   fi
-
-  if [ "$backend" = r2 ]; then
-    grep -q "$profile/postgres-agy-infrastructure.tfstate" "$base/postgres-agy-infrastructure/backend.tf.json"
-    grep -q "$profile/postgres-agy-dns.tfstate" "$base/postgres-agy-dns/backend.tf.json"
-  fi
+  grep -q "$profile/postgres-agy-dns.tfstate" "$base/postgres-agy-dns/backend.tf.json"
 
   local dns="$base/postgres-agy-dns/main.tf"
   grep -q 'resource "cloudflare_dns_record" "endpoint_1"' "$dns"
@@ -135,7 +112,7 @@ checks() {
 }
 
 for fixture in colors optout; do
-  for backend in local r2; do
+  for backend in s3 r2; do
     build "$fixture" "$backend"
   done
 done

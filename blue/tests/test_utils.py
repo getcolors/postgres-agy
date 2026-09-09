@@ -10,9 +10,6 @@ def test_node_count_and_ordinals():
     assert utils.ordinals() == [1, 2, 3]
 
 
-def test_node_naming():
-    assert utils.node_name({"digitalocean-name": "postgres-agy"}, 1) == "postgres-agy-1"
-    assert utils.node_name({"digitalocean-name": "my-pg"}, 2) == "my-pg-2"
 
 
 def test_par_lookup_formatting():

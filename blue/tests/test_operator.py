@@ -38,7 +38,7 @@ async def test_run_dispatches_the_quoted_remote_command_through_ssh():
         seen.append(args)
         return ExecResult(exit=0, out="", err="")
 
-    result = await operator.run(str(FIXTURE_FILE), "status", [], runner, {})
+    result = await operator.run(str(FIXTURE_FILE), "status", [], runner, {"COLORS_PAR_PROVIDER_BACKEND": "r2"})
     assert result["blue/exit"] == 0
     assert len(seen) == 1
     assert seen[0][0] == "ssh"
@@ -51,6 +51,6 @@ async def test_run_rejects_an_out_of_range_node():
     def runner(args):
         return ExecResult(exit=0, out="", err="")
 
-    result = await operator.run(str(FIXTURE_FILE), "status", ["--node", "4"], runner, {})
+    result = await operator.run(str(FIXTURE_FILE), "status", ["--node", "4"], runner, {"COLORS_PAR_PROVIDER_BACKEND": "r2"})
     assert result["blue/exit"] == 2
     assert "--node must be between 1 and 3" in result["blue/err"]

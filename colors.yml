@@ -7,7 +7,10 @@ workdir: .colors
 
 provider-compute: digitalocean
 provider-dns: cloudflare
-provider-backend: local
+provider-backend: r2
+# Replace with the remote state bucket and endpoint for this deployment.
+r2-bucket: example-compute-state
+r2-endpoint: https://example.r2.cloudflarestorage.com
 
 # Preserve this guard in committed desired state. Destruction requires an
 # explicitly authorized one-run override; never edit this flag to bypass it.

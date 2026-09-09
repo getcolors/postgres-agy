@@ -7,7 +7,7 @@ workdir: .colors
 
 provider-compute: digitalocean
 provider-dns: cloudflare
-provider-backend: local
+provider-backend: r2
 
 compute-prevent-destroy: true
 
@@ -76,3 +76,6 @@ cloudflare-record-ttl: 60
 
 r2-bucket: tofu-state-319271fed8bc6d2d9059362be1165f37-eu
 r2-endpoint: https://319271fed8bc6d2d9059362be1165f37.eu.r2.cloudflarestorage.com
+
+s3-bucket: fixture-state
+s3-region: eu-west-1

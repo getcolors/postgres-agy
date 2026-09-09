@@ -8,8 +8,8 @@ OPTOUT_FILE = ROOT / "test" / "fixtures" / "optout.yml"
 
 
 def fixture(overrides: dict | None = None) -> dict:
-    return {**load_yaml(FIXTURE_FILE.read_text()), **(overrides or {})}
+    return {**load_yaml(FIXTURE_FILE.read_text()), "provider-backend": "r2", "blue/event": "build", **(overrides or {})}
 
 
 def optout(overrides: dict | None = None) -> dict:
-    return {**load_yaml(OPTOUT_FILE.read_text()), **(overrides or {})}
+    return {**load_yaml(OPTOUT_FILE.read_text()), "provider-backend": "r2", "blue/event": "build", **(overrides or {})}

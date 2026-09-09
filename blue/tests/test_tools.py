@@ -1,242 +1,73 @@
 import json
-from pathlib import Path
 
 import pytest
-from blue.workflow import StepError
-from conftest import fixture, optout
-from package_once_blue import compute_cluster as cluster
-from package_postgres_agy_blue import tools, validate
-
-# A pre-adoption state exactly as `tofu output -json` parsed it: the four
-# outputs, two parallel lists among them, and no `params`.
-LEGACY_OUTPUTS = {
-    "node_public_ips": ["203.0.113.1", "203.0.113.2", "203.0.113.3"],
-    "node_private_ips": ["10.20.0.1", "10.20.0.2", "10.20.0.3"],
-    "vpc_id": "5a6b7c8d-0000-4000-8000-000000000001",
-    "vpc_ip_range": "10.20.0.0/20",
-}
+from colors_compute import collect, expand
+from conftest import fixture
+from package_postgres_agy_blue import compute, tools
 
 
-def recorded() -> dict:
-    """`params` as the adopted template records it, here through the legacy
-    translation so the two shapes are provably one."""
-    return tools.legacy_params(fixture(), LEGACY_OUTPUTS)
+def recorded():
+    return collect(expand([{'count': 3}]), [
+        {'node_id': str(i), 'provider': 'digitalocean', 'name': f'deployment-{i}',
+         'ip': f'203.0.113.{i+1}', 'vpc_ip': f'10.20.0.{i+11}', 'user': 'root', 'sudoer': 'root'} for i in range(3)], '0')
 
 
-def without(mapping: dict, key: str) -> dict:
-    return {k: v for k, v in mapping.items() if k != key}
+def converged():
+    return fixture({'blue/event': 'create', 'colors-compute/cluster': recorded(),
+                    'colors-compute/shared': {'params': {'network_cidr': '10.20.0.0/20'}},
+                    'ssh-private-key-path': '/tmp/owned'})
 
 
-def converged() -> dict:
-    return fixture({"once/cluster": recorded()})
+def test_library_fallbacks_keep_application_ordinals_and_stable_node_ids():
+    nodes = tools.nodes(fixture())
+    assert [node['ordinal'] for node in nodes] == [1, 2, 3]
+    assert [node['public-ip'] for node in nodes] == ['192.0.2.10', '192.0.2.11', '192.0.2.12']
+    assert [node['name'] for node in nodes] == ['postgres-agy-0', 'postgres-agy-1', 'postgres-agy-2']
 
 
-def test_fallback_nodes_topology():
-    # ONCE's fallbacks at offset 11, the package's names
-    ns = tools.nodes(fixture())
-    assert len(ns) == 3
-    assert [n["name"] for n in ns] == ["postgres-agy-1", "postgres-agy-2", "postgres-agy-3"]
-    assert [n["public-ip"] for n in ns] == ["192.0.2.11", "192.0.2.12", "192.0.2.13"]
-    assert [n["private-ip"] for n in ns] == ["10.114.0.11", "10.114.0.12", "10.114.0.13"]
-    assert [n["ordinal"] for n in ns] == [1, 2, 3]
-    assert tools.data_fn(fixture())["vpc-cidr"] == "10.114.0.0/20"
-    assert tools.nodes(fixture()) == ns
-
-
-def test_the_aliases_are_the_standards():
-    # Compute Cluster Standard §6: the bare profile reaches node 0, then
-    # `<profile>-<index>`; `--node N` is 1-based and lands on index N-1.
-    assert [n["alias"] for n in tools.nodes(fixture())] == \
-        ["postgres-agy-fixture-0", "postgres-agy-fixture-1", "postgres-agy-fixture-2"]
-    assert tools.ssh_alias(fixture(), 1) == "postgres-agy-fixture-0"
-    assert tools.ssh_alias(fixture(), 3) == "postgres-agy-fixture-2"
-    assert cluster.aliases(validate.spec, fixture())[1:] == [n["alias"] for n in tools.nodes(fixture())]
-
-
-def test_a_real_run_reads_every_node_from_the_adopted_cluster():
+def test_live_application_inventory_uses_observed_network_and_node_addresses():
     opts = converged()
-    ns = tools.nodes(opts)
-    assert [n["public-ip"] for n in ns] == ["203.0.113.1", "203.0.113.2", "203.0.113.3"]
-    assert [n["private-ip"] for n in ns] == ["10.20.0.1", "10.20.0.2", "10.20.0.3"]
-    assert [n["name"] for n in ns] == ["postgres-agy-1", "postgres-agy-2", "postgres-agy-3"]
-    assert tools.data_fn(opts)["vpc-cidr"] == "10.20.0.0/20"
-    inv = json.loads(tools.inventory(opts))
-    assert inv["all"]["children"]["postgres"]["hosts"]["postgres-agy-2"]["ansible_host"] == "203.0.113.2"
-    assert [n["public-ip"] for n in tools.dns_specs(opts)[0]["data"]["nodes"]] == \
-        ["203.0.113.1", "203.0.113.2", "203.0.113.3"]
-    assert [n["alias"] for n in tools.acceptance_specs(opts)[0]["data"]["nodes"]] == \
-        ["postgres-agy-fixture-0", "postgres-agy-fixture-1", "postgres-agy-fixture-2"]
+    data = tools.data_fn(opts)
+    assert data['vpc-cidr'] == '10.20.0.0/20'
+    assert [node['private-ip'] for node in data['nodes']] == ['10.20.0.11', '10.20.0.12', '10.20.0.13']
+    hosts = json.loads(tools.inventory(opts))['all']['children']['postgres']['hosts']
+    assert hosts['deployment-0']['ansible_host'] == '203.0.113.1'
+    assert hosts['deployment-0']['node_ordinal'] == 1
+    assert tools.ssh_config_hosts(opts)[0]['name'] == opts['profile']
 
 
-def test_the_legacy_state_is_translated_into_params():
-    params = recorded()
-    assert params["provider"] == "digitalocean"
-    assert [n["index"] for n in params["nodes"]] == [0, 1, 2]
-    assert all(n["role"] is None for n in params["nodes"])
-    assert [n["name"] for n in params["nodes"]] == ["postgres-agy-1", "postgres-agy-2", "postgres-agy-3"]
-    second = params["nodes"][1]
-    assert {k: second[k] for k in ["ip", "vpc_ip", "user", "sudoer"]} == \
-        {"ip": "203.0.113.2", "vpc_ip": "10.20.0.2", "user": "root", "sudoer": "root"}
-    assert [params[k] for k in ["vpc_id", "vpc_ip_range"]] == \
-        ["5a6b7c8d-0000-4000-8000-000000000001", "10.20.0.0/20"]
-    # ONCE accepts the translation as a whole cluster
-    assert not cluster.node_errors(validate.spec, fixture(), params)
-    assert tools.params_errors(params) == []
+def test_no_live_placeholder_or_missing_private_network_fallback():
+    with pytest.raises(ValueError):
+        tools.nodes(fixture({'blue/event': 'create'}))
+    opts = converged()
+    opts['colors-compute/shared'] = {}
+    with pytest.raises(ValueError, match='network CIDR'):
+        tools.data_fn(opts)
+    opts = converged()
+    opts['colors-compute/cluster']['nodes'][0]['vpc_ip'] = None
+    with pytest.raises(ValueError, match='vpc_ip'):
+        tools.nodes(opts)
 
 
-def test_the_legacy_translation_refuses_to_guess():
-    def refusal(outputs):
-        with pytest.raises(StepError) as e:
-            tools.legacy_params(fixture(), outputs)
-        return str(e.value)
-
-    # lists that disagree with each other; the SDK's StepError, so read_state
-    # reports it
-    assert refusal({**LEGACY_OUTPUTS, "node_public_ips": ["203.0.113.1", "203.0.113.2"]}) == \
-        "legacy state lists 2 public addresses and 3 private addresses; refusing to guess the cluster"
-    # lists that disagree with cluster-nodes
-    four = {k: [*LEGACY_OUTPUTS[k], LEGACY_OUTPUTS[k][-1]] for k in ["node_public_ips", "node_private_ips"]}
-    assert refusal({**LEGACY_OUTPUTS, **four}) == \
-        "legacy state lists 4 public addresses and 4 private addresses; refusing to guess the cluster"
-    # no network
-    assert refusal(without(LEGACY_OUTPUTS, "vpc_id")) == "legacy state carries no vpc_id"
-    assert refusal({**LEGACY_OUTPUTS, "vpc_id": " "}) == "legacy state carries no vpc_id"
-    assert refusal(without(LEGACY_OUTPUTS, "vpc_ip_range")) == "legacy state carries no vpc_ip_range"
-    # the range's form is params_errors' to refuse, the same as a recorded state
-    assert tools.params_errors(tools.legacy_params(fixture(), {**LEGACY_OUTPUTS, "vpc_ip_range": "10.20.0.1/20"})) == \
-        ['compute state vpc_ip_range "10.20.0.1/20" is not a canonical IPv4 network such as 10.40.0.0/24']
+def test_application_requirements_preserve_network_trust_boundary_and_legacy_guard():
+    policy = compute.requirements(fixture())
+    assert policy['private'] is True
+    assert policy['legacy_state_keys'] == ['postgres-agy-fixture/postgres-agy-infrastructure.tfstate']
+    rules = policy['security']['ingress']
+    assert {rule['from_port'] for rule in rules if rule['sources'] != ['private']} >= {22, 5432, 5433}
+    assert len([rule for rule in rules if rule['sources'] == ['private']]) >= 2
 
 
-def test_params_errors_hold_the_extension_keys():
-    params = recorded()
-    assert tools.params_errors(params) == []
-    assert tools.params_errors(without(params, "vpc_id")) == ["compute state carries no vpc_id"]
-    assert tools.params_errors({**params, "vpc_id": " "}) == ["compute state carries no vpc_id"]
-    assert tools.params_errors({**params, "vpc_ip_range": None}) == ["compute state carries no vpc_ip_range"]
-    assert tools.params_errors({**params, "vpc_ip_range": "10.20.0.1/20"}) == \
-        ['compute state vpc_ip_range "10.20.0.1/20" is not a canonical IPv4 network such as 10.40.0.0/24']
-    assert tools.params_errors({}) == ["compute state carries no vpc_id", "compute state carries no vpc_ip_range"]
+def test_application_templates_keep_backup_restore_heartbeat_and_dns():
+    targets = [str(spec['target']) for spec in tools.cluster_specs(converged())]
+    for name in ('patroni.yml', 'etcd.conf.yml', 'haproxy.cfg', 'pgbackrest.conf', 'postgres-agy-heartbeat', 'postgres-agy-backup', 'postgres-agy-restore-check', 'inventory.json'):
+        assert any(target.endswith('/' + name) or target.endswith('/' + name + '.j2') for target in targets), name
+    assert tools.dns_specs(converged())
 
 
-async def test_load_infrastructure_adopts_the_state_preflight_handed_on():
-    params = recorded()
-
-    async def load(state):
-        return await tools.load_infrastructure_step(
-            fixture({"blue/event": "delete", "postgres-agy/state": state}))
-
-    # a recorded cluster
-    r = await load({"params": params})
-    assert r["blue/exit"] == 0
-    assert r["once/cluster"] == params
-    assert r["postgres-agy/infrastructure-present?"] is True
-    assert "postgres-agy/state" not in r
-    assert [n["public-ip"] for n in tools.nodes(r)] == ["203.0.113.1", "203.0.113.2", "203.0.113.3"]
-    # a readable state that records no cluster leaves nothing to clean up
-    r = await load({"params": None})
-    assert r["blue/exit"] == 0
-    assert r["postgres-agy/infrastructure-present?"] is False
-    assert "once/cluster" not in r
-    # an unreadable backend fails closed
-    r = await load({"error": "tofu output failed: no backend"})
-    assert r["blue/exit"] == 1
-    assert "could not read the infrastructure state for the delete cleanup" in r["blue/err"]
-    assert "no backend" in r["blue/err"]
-    # a partial cluster is refused with ONCE's message
-    r = await load({"params": {**params, "nodes": params["nodes"][:2]}})
-    assert r["blue/exit"] == 1
-    assert r["blue/err"] == "the compute stage did not report nodes this package declares: 2"
-    # an adopted cluster without its extension keys is refused
-    r = await load({"params": without(params, "vpc_id")})
-    assert r["blue/exit"] == 1
-    assert r["blue/err"] == "compute state carries no vpc_id"
-
-
-def test_a_real_create_resolves_the_cluster_from_the_apply():
-    # the apply's `params` output is what every later stage reads; never the
-    # fallbacks
-    params = recorded()
-    opts = fixture({"blue/event": "create"})
-
-    def apply(p):
-        result = {**opts, "blue/exit": 0}
-        if p is not None:
-            result["postgres-agy/outputs"] = {"params": p}
-        return tools.resolve_infrastructure(opts, result)
-
-    r = apply(params)
-    assert r["blue/exit"] == 0
-    assert r["once/cluster"] == params
-    assert [n["public-ip"] for n in tools.nodes(r)] == ["203.0.113.1", "203.0.113.2", "203.0.113.3"]
-    r = apply(None)
-    assert r["blue/exit"] == 1
-    assert r["blue/err"] == cluster.NO_PARAMS_MESSAGE
-    r = apply({**params, "nodes": params["nodes"][:2]})
-    assert r["blue/exit"] == 1
-    assert r["blue/err"] == "the compute stage did not report nodes this package declares: 2"
-    r = apply(without(params, "vpc_ip_range"))
-    assert r["blue/exit"] == 1
-    assert r["blue/err"] == "compute state carries no vpc_ip_range"
-    # a failed apply, a delete and a build hand the result on untouched
-    assert tools.resolve_infrastructure(opts, {**opts, "blue/exit": 1, "blue/err": "apply failed"})["blue/exit"] == 1
-    assert "once/cluster" not in tools.resolve_infrastructure({**opts, "blue/event": "build"}, {**opts, "blue/exit": 0})
-    assert tools.resolve_infrastructure({**opts, "blue/event": "delete"}, {**opts, "blue/exit": 0})["blue/exit"] == 0
-
-
-def test_the_local_play_receives_one_block_of_aliases():
-    # ssh-config.md: the addresses and the aliases are extra-vars, never
-    # rendered; the marker is the profile; the bare profile reaches node 0
-    variables = tools.ansible_local_extra_vars({**converged(), "blue/event": "create"})
-    assert variables["host_alias"] == "postgres-agy-fixture"
-    assert variables["ssh_hosts"] == [
-        {"name": "postgres-agy-fixture", "ip": "203.0.113.1"},
-        {"name": "postgres-agy-fixture-0", "ip": "203.0.113.1"},
-        {"name": "postgres-agy-fixture-1", "ip": "203.0.113.2"},
-        {"name": "postgres-agy-fixture-2", "ip": "203.0.113.3"},
-    ]
-    assert variables["block_state"] == "present"
-    # The identity file is desired state a build knows and reaches the play
-    # through Selmer, in keygen mode only.
-    assert sorted(variables) == ["block_state", "host_alias", "ssh_hosts"]
-    data = tools.ansible_local_specs(fixture())[0]["data"]
-    assert data["ssh-keygen"] is True
-    assert data["ssh-config-identity-file"] == "~/.ssh/postgres-agy-fixture"
-    assert tools.ansible_local_specs(optout())[0]["data"]["ssh-keygen"] is False
-    # The nodes are reached with the generated key in keygen mode, on a build
-    # through the placeholder, and with the operator's own key in opt-out mode.
-    built = json.loads(tools.inventory(fixture({"blue/event": "build"})))
-    assert built["all"]["children"]["postgres"]["vars"]["ansible_ssh_private_key_file"] == \
-        "/home/build-placeholder/.ssh/postgres-agy-fixture"
-    opted_out = json.loads(tools.inventory(optout()))
-    assert opted_out["all"]["children"]["postgres"]["vars"]["ansible_ssh_private_key_file"] == \
-        "~/.ssh/id_ed25519"
-    assert tools.ansible_local_extra_vars(fixture({"blue/event": "delete"}))["block_state"] == "absent"
-    # a build renders the play without an address
-    rendered = (Path(tools.ROOT) / "tools/ansible-local/main.yml").read_text()
-    assert 'marker: "# {mark} {{ host_alias }} ANSIBLE MANAGED BLOCK"' in rendered
-    assert "{% for host in ssh_hosts %}" in rendered
-    assert "insertbefore: BOF" in rendered
-    assert "192.0.2" not in rendered and "203.0.113" not in rendered
-
-
-def test_infrastructure_specs_render():
-    specs = tools.infrastructure_specs(fixture())
-    assert len(specs) == 1
-    assert specs[0]["template"]["name"] == "infrastructure/main.tf"
-
-
-def test_dns_specs_render():
-    specs = tools.dns_specs(fixture())
-    assert len(specs) == 1
-    assert specs[0]["template"]["name"] == "dns/main.tf"
-
-
-def test_cluster_specs_include_all_required_templates():
-    specs = tools.cluster_specs(fixture())
-    templates = {spec["template"]["name"] for spec in specs if "template" in spec}
-    for name in ["ansible-remote/main.yml", "ansible-remote/etcd.service.j2",
-                 "ansible-remote/patroni.yml.j2", "ansible-remote/haproxy.cfg.j2",
-                 "ansible-remote/pgbackrest.conf.j2",
-                 "ansible-remote/postgres-agy-heartbeat.service.j2",
-                 "ansible-remote/postgres-agy-restore-check.service.j2"]:
-        assert name in templates, name
+def test_dns_backend_uses_r2_credentials_without_rebinding_compute_credentials():
+    env = tools.credential_env(fixture({'r2-access-key-id': 'test-access', 'r2-secret-access-key': 'test-secret', 'cloudflare-api-token': 'dns-token'}), 'provider-dns')
+    assert env['AWS_ACCESS_KEY_ID'] == 'test-access'
+    assert env['AWS_SECRET_ACCESS_KEY'] == 'test-secret'
+    assert env['CLOUDFLARE_API_TOKEN'] == 'dns-token'
+    assert 'DIGITALOCEAN_TOKEN' not in env

@@ -47,7 +47,7 @@ for colour in green red blue; do
   cp "$tmp/bare/$colour" "$tmp/project-$colour/$colour"
   cp "$root/colors.yml" "$tmp/project-$colour/colors.yml"
   (cd "$tmp/project-$colour" && POSTGRES_AGY_LIB_ROOT="$root" "./$colour" build >/dev/null) || fail "POSTGRES_AGY_LIB_ROOT $colour build failed"
-  [ -f "$tmp/project-$colour/.colors/postgres-agy-example/postgres-agy-infrastructure/main.tf" ] || fail "copied $colour payload rendered nothing"
+  [ -f "$tmp/project-$colour/.colors/postgres-agy-example/postgres-agy-infrastructure/shared/shared.tf.json" ] || fail "copied $colour payload rendered nothing"
 done
 ok 'working-tree override renders from a copied payload in every colour'
 

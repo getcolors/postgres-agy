@@ -40,69 +40,38 @@ Never run real create/delete without explicit authorization. Never edit
 ## The two-backend golden and parity axis
 
 The goldens have a second axis beside the fixture: the one
-`test/fixtures/colors.yml` is rendered under the **local** state backend and
+`test/fixtures/colors.yml` is rendered under the **s3** state backend and
 again under **r2**, produced by overlaying `COLORS_PAR_PROVIDER_BACKEND=r2` on
 the same file. The committed trees live at
-`test/resources/golden/{local,r2}/postgres-agy-fixture/` and differ only in the
+`test/resources/golden/{s3,r2}/postgres-agy-fixture/` and differ only in the
 OpenTofu stages' `backend.tf.json`. `scripts/golden.sh` checks green against
 both; `scripts/parity.sh` renders both variants through every colour and diffs
 the trees — and the colour template trees (`red/resources`, blue's embedded
 `resources/`) — byte for byte.
 
-## Reuse surface
-
-The package owns its OpenTofu infrastructure template (3 Droplets in default
-regional VPC, firewall rules, Cloudflare DNS records) and its Ansible playbooks
-— in every colour, as byte-identical template copies. No external server module
-is reused; the three nodes are identical peers with Patroni managing leader
-election and failover. The provider registry is package-owned in each colour's
-`validate` module.
-
 ## Coupling
 
-The package pins the SDK — Green in `green/deps.edn`, the Red SDK in
-`red/package.json`, the Blue SDK in `blue/pyproject.toml` — and ONCE, in the
-same three manifests and in the red payload's `PINS`, for two namespaces:
-`compute-cluster` (`io.github.getcolors.once.compute-cluster`,
-`package-once-red`'s `computeCluster`, `package_once_blue.compute_cluster`),
-the one implementation of the Compute Cluster Standard
-(`workspace/standards/compute-cluster.md`), and `ssh`
-(`io.github.getcolors.once.ssh`, ONCE's unexported `red/src/ssh.ts` reached
-through `red/src/once.ts`, `package_once_blue.ssh`), the reference
-implementation of the SSH Keypair Standard (`workspace/standards/ssh-keypair.md`).
-The package's `ssh` module wraps ONCE's with the build placeholder; its
-`ssh_config` module and its `ansible-local` play are its own copies of the
-multi-node shape every DB package carries (`workspace/standards/ssh-config.md`
-§7; `workspace/scripts/package-copies.py` gates the copies). Keygen mode is
-the absence of `digitalocean-ssh-keys`; `digitalocean-ssh-private-key` is
-required in opt-out mode only. On a real create the keypair matrix and the
-DigitalOcean key preflight run in `start-step` before anything renders; the
-keypair is removed last on delete, after the destroy. The goldens have two
-fixtures, `test/fixtures/colors.yml` (keygen) and `test/fixtures/optout.yml`
-(opt-out, byte-for-byte the pre-standard rendering under its own profile),
-each under both state backends.
-The package owns its provider registry, its OpenTofu templates and its stage
-names; its `compute-providers` registry and `spec` (one homogeneous role of
-`cluster-nodes` nodes, fallback offset 11, the `10.114.0.0/20` fallback
-subnet, a discovered network), its own validators — the fixed node count, the
-`default` VPC mode, the `0.0.0.0/0` refusal on both source lists — and its
-`params-errors`; ONCE owns selection, the source lists, the network and
-topology checks, the fallback nodes, the aliases, `read-state`,
-`adopt-state`, `resolved-cluster` and the provider-switch guard. The compute
-state is the template's `params` output — `provider`, `vpc_id`,
-`vpc_ip_range`, and one node per droplet — adopted under `:once/cluster`; a
-pre-adoption state, which recorded only the parallel
-`node_public_ips`/`node_private_ips` lists, is translated into the same shape
-by the reader in `tools`, and refused when the lists disagree. The
-`~/.ssh/config` block is the SSH Config Standard's: one block marked with the
-profile, `Host <profile>` for node 1 and `<profile>-<index>` per node, with
-the `IdentityFile` pair in keygen mode; the one-cycle removal of the
-pre-standard per-node blocks has run its cycle and is gone. Use
-`POSTGRES_AGY_LIB_ROOT` (the repository root, for every colour; red also
-accepts the `red/` dir directly), `GREEN_LIB_ROOT` and `ONCE_LIB_ROOT` for
-working-tree development. Final launchers use a pushed SHA managed by
-`bb pin` (in `green/`), which stamps all three payloads from their unpinned
-birth forms; deployment launchers are copies, not symlinks.
+Every color depends on the pinned colors-compute library for compute, remote
+state, provider credentials, SSH keys, topology expansion, and lifecycle
+ownership. The package declares three homogeneous peers and application network
+requirements. Colors fans out the same library node operation, then joins
+complete observed outputs for Ansible and DNS. ONCE remains only for application
+DNS helpers and its separate backend credential binding.
+
+Provider templates and registries belong to the library. Supporting another
+compatible provider requires a dependency bump, without application source or
+provider fixture changes. Build and dry-run use documentation addresses and a
+placeholder home without reading local keys. Real operations validate remote
+ownership before generating keys or invoking a compute provider. Existing
+monolithic compute state requires an explicit migration; it is never silently
+adopted. Local SSH config plays remain package-owned and use observed SSH users
+and the selected identity path.
+
+Manifests and lockfiles pin published dependencies. Publish package source before
+running `bb pin` in `green/`, then publish the stamped launcher copies. Red
+launchers resolve compute and SDK transitively through the pinned package;
+repeating these Git dependencies breaks cold installation in Bun 1.3.13.
+
 
 ## Safety
 
