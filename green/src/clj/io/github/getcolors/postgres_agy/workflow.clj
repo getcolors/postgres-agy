@@ -112,11 +112,17 @@
    :postgres-agy/dns :postgres-agy/ansible-local :postgres-agy/cluster
    :postgres-agy/acceptance :postgres-agy/ssh-cleanup :postgres-agy/generated-cleanup])
 
+(defn next-steps [step successors opts]
+  (cond
+    (wf/failed? opts) []
+    (:postgres-agy/already-destroyed opts)
+    (if (and (= :delete (:green/event opts)) (= :postgres-agy/load-infrastructure step))
+      [[:postgres-agy/generated-cleanup opts]] [])
+    :else (mapv #(vector % opts) successors)))
+
 (def workflow
   (-> (wf/workflow {:start :postgres-agy/start :wire-fn wire-fn
-                    :next-fn (fn [_ successors opts]
-                               (if (or (:postgres-agy/already-destroyed opts) (wf/failed? opts)) []
-                                   (mapv #(vector % opts) successors)))})
+                    :next-fn next-steps})
       (wf/advice-add :postgres-agy/dns :before ::backend
                      (backend-advice tools/dns-tool))
       progress/advise

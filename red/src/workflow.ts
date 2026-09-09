@@ -94,8 +94,16 @@ export const sideEffectingSteps = [
   "postgres-agy/acceptance", "postgres-agy/ssh-cleanup", "postgres-agy/generated-cleanup",
 ];
 
+export function nextSteps(step: string, successors: string[] | null | undefined, opts: Opts): [string, Opts][] {
+  if (failed(opts)) return [];
+  if (opts['postgres-agy/already-destroyed']) {
+    return opts['red/event'] === 'delete' && step === 'postgres-agy/load-infrastructure' ? [['postgres-agy/generated-cleanup', opts]] : [];
+  }
+  return (successors ?? []).map(successor => [successor, opts]);
+}
+
 function create() {
-  let wf = workflow({ start: "postgres-agy/start", wireFn,nextFn:(_step,next,opts)=>opts["postgres-agy/already-destroyed"]||failed(opts)?[]:(next??[]).map(step=>[step,opts]) });
+  let wf = workflow({ start: "postgres-agy/start", wireFn,nextFn: nextSteps });
   wf = adviceAdd(wf, "postgres-agy/load-infrastructure", "before",
                  "io.github.getcolors.postgres-agy.workflow/backend",
                  backendAdvice(tools.infrastructureTool));

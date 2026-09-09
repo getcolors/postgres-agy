@@ -47,3 +47,11 @@ Use `provider-backend: r2` or `s3`. R2 requires
 the ambient AWS credential chain. The library owns managed profile keys, or
 uses configured external keys with `ssh-private-key-path`. Existing monolithic
 compute state requires explicit migration and is refused by this lifecycle.
+
+### Repeated deletion after compute retirement
+
+A repeated `delete` with validated retired compute ownership resumes only the
+local generated-file cleanup. It does not require removed SSH keys or contact
+the former hosts, DNS, registry, or other application cloud resources. Failed
+ownership inspection still stops deletion. Local cleanup preserves unrelated
+files and is safe to repeat.

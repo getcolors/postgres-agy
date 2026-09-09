@@ -117,8 +117,17 @@ side_effecting_steps = [
 ]
 
 
+def next_steps(step, successors, opts):
+    if failed(opts):
+        return []
+    if opts.get('postgres-agy/already-destroyed'):
+        # A retired journal proves compute cleanup, not completion of local files.
+        return [('postgres-agy/generated-cleanup', opts)] if opts.get('blue/event') == 'delete' and step == 'postgres-agy/load-infrastructure' else []
+    return [(successor, opts) for successor in successors or []]
+
+
 def create_workflow():
-    wf = workflow(start="postgres-agy/start", wire_fn=wire_fn, next_fn=lambda step, successors, opts: [] if opts.get('postgres-agy/already-destroyed') or failed(opts) else [(successor, opts) for successor in successors or []])
+    wf = workflow(start="postgres-agy/start", wire_fn=wire_fn, next_fn=next_steps)
     wf = advice_add(wf, "postgres-agy/dns", "before",
                     "io.github.getcolors.postgres-agy.workflow/backend",
                     backend_advice(tools.dns_tool))
