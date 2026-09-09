@@ -65,9 +65,9 @@ checks() {
     [ -f "$base/postgres-agy-infrastructure/nodes/$node/node.tf.json" ] || exit 1
   done
   if [ "$fixture" = colors ]; then
-    grep -q "IdentityFile ~/.ssh/$profile" "$base/postgres-agy-ansible-local/main.yml" || exit 1
+    grep -q "colors_keygen: true" "$base/postgres-agy-ansible-local/main.yml" || exit 1
   else
-    grep -q 'IdentityFile ~/.ssh/id_ed25519' "$base/postgres-agy-ansible-local/main.yml" || exit 1
+    grep -q 'colors_keygen: false' "$base/postgres-agy-ansible-local/main.yml" || exit 1
   fi
   grep -q "$profile/postgres-agy-dns.tfstate" "$base/postgres-agy-dns/backend.tf.json"
 
